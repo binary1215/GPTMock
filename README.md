@@ -18,7 +18,7 @@
 
 Integration and coverage badges are updated from local runs. Refresh both by running `scripts/test.sh` with `GIST_TOKEN` available in your environment or `.env`.
 
-GPTMock runs a local protocol adapter in front of the ChatGPT Codex backend. OpenAI SDKs, OpenAI-compatible frontends and gateways, and Ollama-compatible clients can use the same authenticated backend without GPTMock pretending that remote models are local weights. It advertises only model names verified against that backend; availability still depends on your paid ChatGPT account.
+GPTMock runs a local protocol adapter in front of the ChatGPT Codex backend. OpenAI SDKs, OpenAI-compatible frontends and gateways, and Ollama-compatible clients can use the same authenticated backend without GPTMock pretending that remote models are local weights. Its model catalog is a configured snapshot, not a live availability check. Backend access can change before that catalog is updated; see [Supported Models](#supported-models) for dated results and known stale entries.
 
 GPTMock adapts client requests to the backend's supported format while preserving model identity, instruction text, strict function schemas, tool choice, reasoning controls, and service-tier requests. For GPT-5.6 Luna/Terra/Sol and GPT-6 Astra, system-message text is carried in the Responses `instructions` field so existing chat clients can keep their system prompts. The actual response model, service tier, terminal status, and remaining upstream errors are returned to the client.
 
@@ -165,6 +165,8 @@ gptmock info
 
 ## Usage Examples
 
+Use an explicit model that is currently available to your ChatGPT account. The basic text examples below use `gpt-5.6-luna`, which completed direct Chat and Responses requests in the 2026-09-13 check. This does not establish every SDK or tool workflow. For authenticated deployments, add `Authorization: Bearer <GPTMOCK_API_KEY>` to the curl examples and use the configured key in SDK clients.
+
 ### Existing Docker volume migration
 
 The image runs as UID/GID `10001:10001`. The original Compose bind mount can contain files written by an older root-running image; image-layer ownership does not change host bind-mount permissions. Back up the credential directory and stop GPTMock before migrating it. On a Linux host, from the verified GPTMock checkout directory:
@@ -227,6 +229,8 @@ If this error persists, verify that the running GPTMock container includes the f
 
 The regression tests in [`tests/test_astra.py`](tests/test_astra.py) cover Chat Completions, Responses, Ollama chat/generate, fast aliases, and streaming/non-streaming requests using a simulated upstream. Live client verification is separate from these tests.
 
+**Known remaining limitation (2026-09-13):** `gpt-5.5` and `gpt-5.3-codex-spark` also rejected literal system messages in direct Chat requests. They are not included in the current system-message adapter. GPT-5.5 still completed user-only Chat requests, developer-message requests, and Responses requests using `instructions`; the system-role error does not mean that model is unavailable. Do not discard system prompts or silently substitute another model to hide this error.
+
 ### Python (OpenAI SDK)
 
 ```python
@@ -238,7 +242,7 @@ client = OpenAI(
 )
 
 resp = client.chat.completions.create(
-    model="gpt-5.4",
+    model="gpt-5.6-luna",
     messages=[{"role": "user", "content": "hello world"}]
 )
 print(resp.choices[0].message.content)
@@ -252,7 +256,7 @@ from langchain_openai import ChatOpenAI
 llm = ChatOpenAI(
     base_url="http://127.0.0.1:8000/v1",
     api_key="gptmock-local",  # use GPTMOCK_API_KEY when it is configured
-    model="gpt-5.4",
+    model="gpt-5.6-luna",
 )
 response = llm.invoke("hello world")
 print(response.content)
@@ -264,7 +268,7 @@ print(response.content)
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-5.4",
+    "model": "gpt-5.6-luna",
     "messages": [{"role": "user", "content": "hello world"}]
   }'
 ```
@@ -273,13 +277,15 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 GPTMock can expose the ChatGPT Codex backend's built-in image generation tool through `POST /v1/responses`. This uses your existing GPTMock / Codex OAuth credentials; no separate OpenAI API key is required.
 
+The original examples used `gpt-5.4` and `gpt-5.4-mini`; both were rejected by the tested ChatGPT Codex backend on 2026-09-13. Image generation was not revalidated with a replacement model. The following illustrates the request format only: replace `<verified-image-generation-model>` with a model whose image-generation tool access you have verified for your account. A successful text response alone does not verify image generation.
+
 Pass an `image_generation` tool in the Responses API request:
 
 ```bash
 curl http://127.0.0.1:8000/v1/responses \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-5.4",
+    "model": "<verified-image-generation-model>",
     "input": [
       {
         "type": "message",
@@ -321,38 +327,35 @@ For non-streaming requests, generated images are returned as `image_generation_c
 }
 ```
 
-Decode and save the first generated image with Python:
+Given the parsed response JSON, find an image result by type rather than assuming a fixed output position:
 
 ```python
 import base64
 
-image_b64 = response["output"][1]["result"]
+image_b64 = next(
+    (item["result"] for item in response.get("output", [])
+     if item.get("type") == "image_generation_call" and item.get("result")),
+    None,
+)
+if image_b64 is None:
+    raise RuntimeError("The response did not contain a generated image")
 with open("cat.png", "wb") as fp:
     fp.write(base64.b64decode(image_b64))
 ```
 
-You can also run the included live probe script from a checked-out repository:
-
-```bash
-uv run python scripts/probe_image_generation.py \
-  --model gpt-5.4 \
-  --prompt "Use the image_generation tool to create a cute cat illustration. Return only the generated image." \
-  --output .omx/logs/cat.png
-```
-
-> **Notes:** `gpt-5.4` and `gpt-5.4-mini` have been verified with this flow. The model interprets the request and invokes the built-in tool; the image bytes come back in the `image_generation_call.result` field. Model availability and image-generation entitlements are controlled by the upstream ChatGPT Codex backend and can vary by account.
+> **Notes:** Image-generation support is account- and backend-dependent. Earlier documentation reported successful GPT-5.4/mini image generation, but that is historical evidence, not current availability.
 
 ### Local Image Inspection (`view_image`)
 
 GPTMock also supports a Codex-compatible `view_image` client-side tool for `POST /v1/responses`. Unlike `image_generation`, this is not executed by the upstream backend: GPTMock reads the local file, returns it to the model as an `input_image` function-call output, and then continues the Responses turn.
 
-Enable it per request by passing the shorthand tool:
+Enable it per request by passing the shorthand tool. This is a request-format example, not a fresh live validation: replace `<verified-image-input-model>` with a currently available model verified for image input and function calling, and use an image path readable by the GPTMock server:
 
 ```bash
 curl http://127.0.0.1:8000/v1/responses \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-5.4-mini",
+    "model": "<verified-image-input-model>",
     "input": [
       {
         "type": "message",
@@ -360,7 +363,7 @@ curl http://127.0.0.1:8000/v1/responses \
         "content": [
           {
             "type": "input_text",
-            "text": "Use view_image to inspect this local image path: assets/banner.png. Describe it briefly."
+            "text": "Use view_image to inspect this local image path: /images/example.png. Describe it briefly."
           }
         ]
       }
@@ -372,6 +375,8 @@ curl http://127.0.0.1:8000/v1/responses \
 ```
 
 The shorthand is normalized to a Responses function tool named `view_image`. You can also provide an explicit function tool with the same name.
+
+**Docker:** paths are resolved inside the container, not on the client or host. The image does not include the repository's `assets/banner.png`. Mount your image directory read-only at `/images` alongside the existing credential volume, set `GPTMOCK_VIEW_IMAGE_ROOTS=/images`, and ensure the container's non-root user can read the selected file. Merely setting the allowed roots does not mount or copy any files.
 
 By default, `view_image` can read files under the server's current working directory only. Configure the readable roots when needed:
 
@@ -393,21 +398,27 @@ Supported image content types are PNG, JPEG, GIF, and WebP. `detail: "original"`
 
 ## Supported Models
 
-| Model | Reasoning Efforts | Status |
+The following snapshot combines the current registry with direct backend checks on **2026-09-13 (KST)**. The availability check used `low` effort, non-streaming, user-only Chat Completions and Responses requests. Successful responses contained the requested test text and the expected concrete model name. It did not rerun every reasoning level, tools, images, or client integration. The effort column describes GPTMock's configured validation range, not fresh verification of every level.
+
+| Model | Configured Reasoning Efforts | Observed Backend Status (2026-09-13) |
 |-------|-------------------|--------|
-| `gpt-5.3-codex-spark` | `low` / `medium` / `high` / `xhigh` | ✅ Verified upstream |
-| `gpt-5.4` | `low` / `medium` / `high` / `xhigh` | ✅ Verified upstream |
-| `gpt-5.5` | `low` / `medium` / `high` / `xhigh` | ✅ Verified upstream |
-| `gpt-5.6` | `none` / `low` / `medium` / `high` / `xhigh` / `max` | ✅ Verified alias; upstream resolves it to `gpt-5.6-sol` |
-| `gpt-5.6-sol` | `none` / `low` / `medium` / `high` / `xhigh` / `max` | ✅ Verified upstream |
-| `gpt-5.6-terra` | `none` / `low` / `medium` / `high` / `xhigh` / `max` | ✅ Verified upstream |
-| `gpt-5.6-luna` | `none` / `low` / `medium` / `high` / `xhigh` / `max` | ✅ Verified upstream |
-| `gpt-5.4-mini` | `low` / `medium` / `high` / `xhigh` | ✅ Verified upstream |
-| `gpt-6-astra` | `low` / `medium` / `high` / `xhigh` / `max` | ✅ Verified upstream on 2026-09-05 |
+| `gpt-5.3-codex-spark` | `low` / `medium` / `high` / `xhigh` | ✅ Basic text requests completed; literal system role rejected |
+| `gpt-5.4` | `low` / `medium` / `high` / `xhigh` | ❌ HTTP 400: unsupported with the tested ChatGPT account; stale registry entry |
+| `gpt-5.5` | `low` / `medium` / `high` / `xhigh` | ✅ Basic text requests completed; literal system role rejected |
+| `gpt-5.6` | `none` / `low` / `medium` / `high` / `xhigh` / `max` | ✅ Completed as `gpt-5.6-sol` |
+| `gpt-5.6-sol` | `none` / `low` / `medium` / `high` / `xhigh` / `max` | ✅ Basic text requests completed |
+| `gpt-5.6-terra` | `none` / `low` / `medium` / `high` / `xhigh` / `max` | ✅ Basic text requests completed |
+| `gpt-5.6-luna` | `none` / `low` / `medium` / `high` / `xhigh` / `max` | ✅ Basic text requests completed |
+| `gpt-5.4-mini` | `low` / `medium` / `high` / `xhigh` | ❌ HTTP 400: unsupported with the tested ChatGPT account; stale registry entry |
+| `gpt-6-astra` | `low` / `medium` / `high` / `xhigh` / `max` | ✅ Basic text requests completed |
+
+**Known registry mismatch:** `/v1/models` and `/api/tags` still advertise `gpt-5.4` and `gpt-5.4-mini`. Their presence is not proof of current access. Both returned `The '…' model is not supported when using Codex with a ChatGPT account.` Registry cleanup is still pending; this README does not claim those entries have already been removed.
 
 Direct Docker probes on 2026-09-03 confirmed every listed GPT-5.6 reasoning effort (`none` through `max`) for Sol, Terra, and Luna through `/v1/responses`. All 18 requests completed successfully and returned the requested concrete model name.
 
 > **Fast compatibility aliases:** `*-fast` names are accepted when requested directly and add `service_tier="priority"` to the same verified base-model request. They are not separate models, are not advertised by `/v1/models` or `/api/tags`, and do not guarantee priority service. New integrations should prefer the verified base model plus an explicit `service_tier="priority"` request. GPTMock returns the actual upstream `service_tier` unchanged. The seven pre-Astra aliases were accepted on 2026-08-26 with `service_tier="default"`. Astra's priority request was separately accepted on 2026-09-05 and also returned `default`; `gpt-6-astra-fast` uses that same request-only convention.
+
+Fast aliases inherit their base model's availability. On 2026-09-13, `gpt-5.4-fast` and `gpt-5.4-mini-fast` were rejected; `gpt-5.5-fast` completed as `gpt-5.5` with actual tier `default`. Recognizing an alias does not make an unavailable base model usable.
 
 > **GPT-5.6 compatibility note:** GPTMock exposes only verified GPT-5.6 model names. `gpt-5.6` follows OpenAI's documented alias to `gpt-5.6-sol`. OpenAI documents Pro as `reasoning.mode="pro"` on the same model rather than as a `*-pro` model ID, but the ChatGPT Codex backend rejected that mode in direct probes. GPTMock therefore advertises no Pro model slug and rejects `reasoning.mode` locally instead of sending a request known to be unsupported by this upstream.
 
@@ -419,7 +430,9 @@ Direct Docker probes on 2026-09-03 confirmed every listed GPT-5.6 reasoning effo
 
 ### Deprecated / Unsupported Models
 
-Rejected names are omitted from `/v1/models` and `/api/tags`. A client can still send an arbitrary model identifier; GPTMock forwards it unchanged and preserves the upstream rejection instead of silently routing it to a different model.
+The older rejected names listed above are omitted from `/v1/models` and `/api/tags`; newly rejected GPT-5.4/mini entries are the known exception described in the table. Unknown non-alias identifiers are forwarded to upstream and its rejection is preserved, rather than being silently replaced with a different model. Removed aliases and unsupported reasoning options can instead be rejected locally.
+
+Always supply a non-empty model name. Chat requests without `model` return HTTP 422. An empty string currently falls back to `gpt-5.4` and fails against the tested backend; this default also needs a separate code correction.
 
 ### Request and Response Semantics
 
@@ -439,7 +452,7 @@ Rejected names are omitted from `/v1/models` and `/api/tags`. A client can still
 | Ollama model metadata | Marked as remote with zero/empty unknown size and digest values; no GGUF, Llama family, parameter size, quantization, or local evaluation timings are fabricated |
 | Ollama function calls | Arguments are native JSON objects. Streaming fragments are buffered until a valid tool-call finish; tool results are matched by name when supplied |
 
-The GPT-5.6 alias and reasoning-effort range follow [OpenAI's GPT-5.6 model guidance](https://developers.openai.com/api/docs/guides/latest-model). GPTMock's accepted options are narrower because they reflect what the ChatGPT Codex backend accepted during the dated probes above, not what may be available through a separate OpenAI API account.
+The GPT-5.6 alias and reasoning-effort range follow [OpenAI's GPT-5.6 model guidance](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.6). GPTMock's accepted options are narrower because they reflect what the ChatGPT Codex backend accepted during the dated probes above, not what may be available through a separate OpenAI API account.
 
 The default output-token policy is intentionally compatibility-oriented. OpenAI SDKs and agent frontends commonly add an output-token field even when the user did not set one. GPTMock accepts such requests but does not claim that the limit was honored: the field is omitted only from the upstream request, a warning names the omitted field, and the HTTP response exposes the same fact. Use `--output-token-policy reject` when failing closed is preferable to frontend compatibility.
 
@@ -464,7 +477,7 @@ Docker probes on 2026-09-03 verified authenticated raw HTTP requests for tags, s
 | POST | `/v1/chat/completions` | OpenAI Chat Completions (stream / non-stream) |
 | POST | `/v1/completions` | OpenAI Text Completions |
 | POST | `/v1/responses` | OpenAI Responses API semantics |
-| GET | `/v1/models` | List available models |
+| GET | `/v1/models` | List configured model metadata; not a live availability check |
 | GET | `/api/version` | Ollama-compatible version info |
 | POST | `/api/chat` | Ollama-compatible chat |
 | POST | `/api/generate` | Ollama-compatible text generation |
@@ -481,7 +494,7 @@ Docker probes on 2026-09-03 verified authenticated raw HTTP requests for tags, s
 - **Tool / Function Calling** — including web search with URL citation annotations via `responses_tools`
 - **Image Generation** — Responses API `image_generation` tool support with base64 PNG output
 - **Local Image Inspection** — Codex-compatible `view_image` function tool for allowed local image paths
-- **Thinking Summaries** — `<think>` tags, `o3` reasoning format, or legacy mode
+- **Thinking Summaries** — `standard` mode returns `reasoning_content` by default; optional `think-tags`, `o3`, and `legacy` modes support other clients
 - **Responses API** — `POST /v1/responses` for LangChain and other clients that auto-route codex models
 - **Ollama Compatibility** — chat and generate APIs with remote-model metadata, without fabricated GGUF sizes, digests, or local evaluation timings
 - **Auto Token Refresh** — JWT tokens are refreshed automatically before expiry
@@ -592,11 +605,13 @@ data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}
 
 ### Example Request
 
+This shows the web-search request format. The basic text availability check above did not revalidate web-search entitlement or tool execution for the example model.
+
 ```bash
 curl http://127.0.0.1:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-5.4",
+    "model": "gpt-5.6-luna",
     "messages": [{"role":"user","content":"Find current METAR rules"}],
     "stream": true,
     "responses_tools": [{"type": "web_search"}],
