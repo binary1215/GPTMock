@@ -13,15 +13,14 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
 </p>
 
-> **GPTMock is maintained by [rapidrabbit76](https://github.com/rapidrabbit76/GPTMock), building on [RayBytes/chatmock](https://github.com/RayBytes/chatmock).**
-> The original project attribution, license, and upstream Docker Compose file are preserved.
+> **This is a fork of [RayBytes/chatmock](https://github.com/RayBytes/chatmock).**
 > The original Flask + synchronous `requests` stack has been replaced with **FastAPI + async `httpx`**, a layered architecture (router / service / infra), `pydantic-settings` configuration, and `uv` as the build system.
 
 Integration and coverage badges are updated from local runs. Refresh both by running `scripts/test.sh` with `GIST_TOKEN` available in your environment or `.env`.
 
 GPTMock runs a local protocol adapter in front of the ChatGPT Codex backend. OpenAI SDKs, OpenAI-compatible frontends and gateways, and Ollama-compatible clients can use the same authenticated backend without GPTMock pretending that remote models are local weights. It advertises only model names verified against that backend; availability still depends on your paid ChatGPT account.
 
-GPTMock adapts client requests to the backend's supported format while preserving model identity, instruction text, strict function schemas, tool choice, reasoning controls, and service-tier requests. For Astra, system-message text is carried in the Responses `instructions` field so existing chat clients work without changing their prompts. The actual response model, service tier, terminal status, and remaining upstream errors are returned to the client.
+GPTMock adapts client requests to the backend's supported format while preserving model identity, instruction text, strict function schemas, tool choice, reasoning controls, and service-tier requests. For GPT-5.6 Luna/Terra/Sol and GPT-6 Astra, system-message text is carried in the Responses `instructions` field so existing chat clients can keep their system prompts. The actual response model, service tier, terminal status, and remaining upstream errors are returned to the client.
 
 > **Migration note:** `--reasoning-compat` now defaults to `standard`, which emits reasoning via `delta.reasoning_content` / `message.reasoning_content` instead of injecting `<think>` tags into `content`. Set `--reasoning-compat think-tags` (or `GPTMOCK_REASONING_COMPAT=think-tags`) to keep the old behavior.
 
@@ -35,9 +34,9 @@ GPTMock adapts client requests to the backend's supported format while preservin
 
 ## Quick Start (Docker, recommended)
 
-`docker-compose.yml` is preserved exactly from [rapidrabbit76/GPTMock](https://github.com/rapidrabbit76/GPTMock). It uses `rapidrabbit76/gptmock:latest`, the original `./volumes/gptmock` bind mount, and requires a local `.env` file. Its published ports bind to all host interfaces.
+The standard `docker-compose.yml` uses `rapidrabbit76/gptmock:latest`, the `./volumes/gptmock` bind mount, and requires a local `.env` file. Its published ports bind to all host interfaces.
 
-The commands below explicitly select `docker-compose.local.yml`, a separate configuration that builds the checked-out source and applies the hardened runtime settings. It does not overwrite or merge into the original Compose file.
+The commands below explicitly select `docker-compose.local.yml`, a separate configuration that builds the checked-out source and applies the hardened runtime settings. It does not overwrite or merge into `docker-compose.yml`. When testing an unmerged pull request, check out its branch before building; the published image and PyPI package may not contain those changes yet.
 
 ### 1. Clone and build
 
@@ -216,9 +215,17 @@ Use OpenCode's Responses provider as the recommended configuration. OpenCode 1.x
 
 Select `gptmock/gpt-5.6-luna` and the desired variant. OpenCode automatically sends `max_output_tokens`; GPTMock's default `omit` policy keeps the request compatible while explicitly reporting that the limit was not enforced.
 
-For `gpt-6-astra`, `@ai-sdk/openai-compatible` also works through GPTMock's Chat endpoint: text system messages are moved into upstream `instructions`. OpenCode 1.17.18 completed a real file-read tool call and its follow-up through both adapters. This Astra-specific compatibility does not establish Chat-adapter support for every other model. SDK versions may encode Responses prompts as developer input or as `instructions`.
+For `gpt-6-astra` and the GPT-5.6 Luna/Terra/Sol models, GPTMock's Chat endpoint moves text system messages into upstream `instructions`. OpenCode 1.17.18 completed a real Astra file-read tool call and its follow-up through both adapters. GPT-5.6 uses the same system-message adaptation; that does not establish full client/tool compatibility for every model. SDK versions may encode Responses prompts as developer input or as `instructions`.
 
 To request maximum Astra reasoning, select `gpt-6-astra` with `--variant max` (provider option `reasoningEffort: "max"`). `gpt-6-astra-max` is not a model: that removed alias returns HTTP 400 with migration guidance instead of silently selecting another effort. `max` remains supported through the reasoning parameter.
+
+### Troubleshooting: `System messages are not allowed`
+
+Older GPTMock builds adapted text system messages only for Astra. Chat clients sending system prompts to GPT-5.6 Luna/Terra/Sol could therefore receive HTTP 400 from the backend. The adapter now applies the same conversion to those three models, including the `gpt-5.6` alias and their `*-fast` requests. Existing `instructions` and system text are retained in order; developer messages and tool history remain unchanged.
+
+If this error persists, verify that the running GPTMock container includes the fix, not just that the source checkout was updated. Rebuild and recreate the GPTMock service using its existing deployment configuration and credential storage. When a gateway sits between the client and GPTMock, compare a small system-plus-user request directly against GPTMock and through the gateway before changing the client's API mode or model. A successful direct request does not by itself verify the complete Hermes or other agent workflow.
+
+The regression tests in [`tests/test_astra.py`](tests/test_astra.py) cover Chat Completions, Responses, Ollama chat/generate, fast aliases, and streaming/non-streaming requests using a simulated upstream. Live client verification is separate from these tests.
 
 ### Python (OpenAI SDK)
 
@@ -406,7 +413,7 @@ Direct Docker probes on 2026-09-03 confirmed every listed GPT-5.6 reasoning effo
 
 > **GPT-6 Astra:** `gpt-6-astra` connects directly to that exact upstream model. The [official model documentation](https://developers.openai.com/api/docs/models/gpt-6-astra) lists `low`, `medium`, `high`, `xhigh`, and `max`; direct ChatGPT Codex probes on 2026-09-05 completed at all five efforts and echoed the requested model and effort. That backend rejected `none`, `minimal`, `ultra`, `gpt-6-astra-pro`, and `reasoning.mode="pro"`. Those options are not advertised as supported. OpenAI Chat Completions and Ollama clients use GPTMock's existing Responses-backed adapter, including tool calls. See [Astra validation](docs/astra-validation.md) for the tested interfaces and limitations.
 
-> **Astra client compatibility:** the connected backend rejects a literal `system` input role. GPTMock automatically carries text from those messages into the supported `instructions` field, after any existing instructions and in message order. Developer/user messages and tool results remain in `input`. This applies to OpenAI Chat, Responses, Ollama chat, and Ollama generate's `system` field, including fast requests and streaming. Existing clients can keep their system prompts.
+> **GPT-5.6 and Astra client compatibility:** the connected backend rejects a literal `system` input role for these models. GPTMock automatically carries text from those messages into the supported `instructions` field, after any existing instructions and in message order. Developer/user messages and tool results remain in `input`. This applies to OpenAI Chat, Responses, Ollama chat, and Ollama generate's `system` field, including fast requests and streaming. Existing clients can keep their system prompts. Other models and unsupported non-text system content are passed through unchanged.
 
 > **Upstream availability note:** model availability can change independently of GPTMock releases. The older model list reflects direct probes made on 2026-08-26, GPT-5.6 was rechecked on 2026-09-03, and Astra was verified on 2026-09-05. `gpt-5`, `gpt-5.1`, `gpt-5.2`, `gpt-5-codex`, `gpt-5.1-codex`, `gpt-5.1-codex-mini`, `gpt-5.1-codex-max`, `gpt-5.2-codex`, and `gpt-5.3-codex` were rejected and are therefore not advertised.
 
@@ -418,7 +425,7 @@ Rejected names are omitted from `/v1/models` and `/api/tags`. A client can still
 
 | Input or event | GPTMock behavior |
 |----------------|------------------|
-| `system` and `developer` messages | For Astra, system text is moved into `instructions` and developer messages remain in `input`; other models retain the supplied roles |
+| `system` and `developer` messages | For GPT-5.6 Luna/Terra/Sol and Astra, system text is moved into `instructions` and developer messages remain in `input`; other models retain the supplied roles |
 | Function tools with `strict: true` | Strict schema flag and parameters are preserved |
 | `tool_choice: "required"` | Forwarded as required; never weakened to `auto` |
 | Rejected tools or model options | Upstream error is returned; GPTMock does not remove tools and retry |
@@ -611,5 +618,4 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ## Credits
 
 - Original project: [RayBytes/chatmock](https://github.com/RayBytes/chatmock)
-- GPTMock author and upstream maintainer: [rapidrabbit76/GPTMock](https://github.com/rapidrabbit76/GPTMock)
-- Contribution fork: [binary1215/GPTMock](https://github.com/binary1215/GPTMock)
+- This fork: [rapidrabbit76/GPTMock](https://github.com/rapidrabbit76/GPTMock)

@@ -23,9 +23,10 @@ from gptmock.services.reasoning import (
     allowed_efforts_for_model,
     extract_reasoning_from_model_name,
 )
-from gptmock.services.upstream import _adapt_astra_system_messages
+from gptmock.services.upstream import _adapt_system_messages
 
 ASTRA_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
+SYSTEM_INSTRUCTION_MODELS = ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"]
 
 
 def test_astra_discovery_and_remote_metadata() -> None:
@@ -100,11 +101,13 @@ def test_astra_rejected_options_are_not_registered() -> None:
 
 
 @pytest.mark.parametrize("route", ["/v1/responses", "/v1/chat/completions", "/api/chat", "/api/generate"])
-@pytest.mark.parametrize("model", ["gpt-6-astra", "gpt-6-astra-fast"])
-def test_astra_system_messages_reach_upstream_as_instructions(
-    monkeypatch: pytest.MonkeyPatch, route: str, model: str,
+@pytest.mark.parametrize("model", [m + suffix for m in [*SYSTEM_INSTRUCTION_MODELS, "gpt-5.6"] for suffix in ("", "-fast")])
+@pytest.mark.parametrize("stream", [False, True])
+def test_system_messages_reach_upstream_as_instructions(
+    monkeypatch: pytest.MonkeyPatch, route: str, model: str, stream: bool,
 ) -> None:
     captured: list[dict[str, Any]] = []
+    upstream_model, _ = resolve_upstream_model(model)
 
     async def fake_auth() -> tuple[str, str]:
         return "test-token", "test-account"
@@ -113,13 +116,15 @@ def test_astra_system_messages_reach_upstream_as_instructions(
         captured.append(json.loads(request.content))
         event = {"type": "response.completed", "response": {
             "id": "resp_astra",
-            "model": "gpt-6-astra",
+            "model": upstream_model,
             "status": "completed",
             "service_tier": "default",
             "output": [{"type": "message", "role": "assistant", "status": "completed",
                         "content": [{"type": "output_text", "text": "OK", "annotations": []}]}],
         }}
-        return httpx.Response(200, content=f"data: {json.dumps(event)}\n\n".encode())
+        delta = {"type": "response.output_text.delta", "delta": "OK", "output_index": 0, "content_index": 0}
+        events = [delta, event]
+        return httpx.Response(200, content="".join(f"data: {json.dumps(item)}\n\n" for item in events).encode())
 
     async def test_http_client() -> AsyncIterator[httpx.AsyncClient]:
         async with httpx.AsyncClient(transport=httpx.MockTransport(fake_transport)) as client:
@@ -128,7 +133,7 @@ def test_astra_system_messages_reach_upstream_as_instructions(
     for module in ("gptmock.services.chat", "gptmock.services.responses"):
         loaded = importlib.import_module(module)
         monkeypatch.setattr(loaded, "get_effective_chatgpt_auth", fake_auth)
-    payload: dict[str, Any] = {"model": model, "stream": False}
+    payload: dict[str, Any] = {"model": model, "stream": stream}
     if route == "/api/generate":
         payload.update(system="system authority", prompt="hello")
     else:
@@ -143,10 +148,19 @@ def test_astra_system_messages_reach_upstream_as_instructions(
     with TestClient(app) as client:
         response = client.post(route, json=payload)
     assert response.status_code == 200
-    assert response.json()["model"] == "gpt-6-astra"
-    assert response.json()["service_tier"] == "default"
+    if stream:
+        assert "OK" in response.text
+        if route == "/v1/responses":
+            assert "response.completed" in response.text
+        elif route == "/v1/chat/completions":
+            assert "data: [DONE]" in response.text
+        else:
+            assert json.loads(response.text.splitlines()[-1])["done"] is True
+    else:
+        assert response.json()["model"] == upstream_model
+        assert response.json()["service_tier"] == "default"
     assert len(captured) == 1
-    assert captured[0]["model"] == "gpt-6-astra"
+    assert captured[0]["model"] == upstream_model
     assert captured[0]["instructions"].endswith("system authority")
     expected_roles = ["user"] if route == "/api/generate" else ["developer", "user"]
     assert [item["role"] for item in captured[0]["input"]] == expected_roles
@@ -154,27 +168,34 @@ def test_astra_system_messages_reach_upstream_as_instructions(
         assert captured[0]["service_tier"] == "priority"
 
 
-def test_astra_instruction_adaptation_preserves_text_and_input_payload() -> None:
+@pytest.mark.parametrize("model", SYSTEM_INSTRUCTION_MODELS)
+def test_instruction_adaptation_preserves_text_and_input_payload(model: str) -> None:
     payload = {
-        "model": "gpt-6-astra", "instructions": "existing instructions",
+        "model": model, "instructions": "existing instructions",
         "input": [
             {"role": "system", "content": "first system"},
             {"type": "message", "role": "system", "content": [{"type": "input_text", "text": "second system"}]},
             {"role": "user", "content": "hello"},
         ],
     }
-    adapted = _adapt_astra_system_messages(payload)
+    adapted = _adapt_system_messages(payload)
     assert adapted["instructions"] == "existing instructions\n\nfirst system\n\nsecond system"
     assert adapted["input"] == [{"role": "user", "content": "hello"}]
     assert payload["instructions"] == "existing instructions"
     assert len(payload["input"]) == 3
-    assert _adapt_astra_system_messages(adapted) == adapted
+    assert _adapt_system_messages(adapted) == adapted
 
 
-def test_astra_instruction_adaptation_does_not_discard_nontext_content() -> None:
-    payload = {"model": "gpt-6-astra", "input": [
+@pytest.mark.parametrize("model", SYSTEM_INSTRUCTION_MODELS)
+def test_instruction_adaptation_does_not_discard_nontext_content(model: str) -> None:
+    payload = {"model": model, "input": [
+        {"role": "system", "content": "preserve this text too"},
         {"role": "system", "content": [{"type": "input_image", "image_url": "https://example.com/image.png"}]},
     ]}
-    assert _adapt_astra_system_messages(payload) is payload
-    other_model = {"model": "gpt-5.6-luna", "input": [{"role": "system", "content": "system authority"}]}
-    assert _adapt_astra_system_messages(other_model) is other_model
+    assert _adapt_system_messages(payload) is payload
+
+
+@pytest.mark.parametrize("model", ["gpt-5.4", "gpt-5.5", "unknown-model"])
+def test_instruction_adaptation_leaves_other_models_unchanged(model: str) -> None:
+    payload = {"model": model, "input": [{"role": "system", "content": "system authority"}]}
+    assert _adapt_system_messages(payload) is payload
