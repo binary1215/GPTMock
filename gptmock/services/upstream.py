@@ -17,7 +17,9 @@ logger = logging.getLogger(__name__)
 def _adapt_system_messages(payload: dict[str, Any]) -> dict[str, Any]:
     """Carry system text into instructions for models verified to reject the role."""
     # Aliases have already been resolved to concrete models by each service.
-    if payload.get("model") not in {"gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"}:
+    if payload.get("model") not in {
+        "gpt-5.3-codex-spark", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra",
+    }:
         return payload
     input_items = payload.get("input")
     if not isinstance(input_items, list):

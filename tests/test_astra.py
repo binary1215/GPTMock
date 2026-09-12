@@ -26,7 +26,14 @@ from gptmock.services.reasoning import (
 from gptmock.services.upstream import _adapt_system_messages
 
 ASTRA_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
-SYSTEM_INSTRUCTION_MODELS = ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra"]
+SYSTEM_INSTRUCTION_MODELS = [
+    "gpt-5.3-codex-spark", "gpt-5.5", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol", "gpt-6-astra",
+]
+SYSTEM_INSTRUCTION_REQUEST_MODELS = [
+    model + suffix
+    for model in [*SYSTEM_INSTRUCTION_MODELS, "gpt-5.6"]
+    for suffix in (("",) if model == "gpt-5.3-codex-spark" else ("", "-fast"))
+]
 
 
 def test_astra_discovery_and_remote_metadata() -> None:
@@ -101,7 +108,7 @@ def test_astra_rejected_options_are_not_registered() -> None:
 
 
 @pytest.mark.parametrize("route", ["/v1/responses", "/v1/chat/completions", "/api/chat", "/api/generate"])
-@pytest.mark.parametrize("model", [m + suffix for m in [*SYSTEM_INSTRUCTION_MODELS, "gpt-5.6"] for suffix in ("", "-fast")])
+@pytest.mark.parametrize("model", SYSTEM_INSTRUCTION_REQUEST_MODELS)
 @pytest.mark.parametrize("stream", [False, True])
 def test_system_messages_reach_upstream_as_instructions(
     monkeypatch: pytest.MonkeyPatch, route: str, model: str, stream: bool,
@@ -172,17 +179,26 @@ def test_system_messages_reach_upstream_as_instructions(
 def test_instruction_adaptation_preserves_text_and_input_payload(model: str) -> None:
     payload = {
         "model": model, "instructions": "existing instructions",
+        "reasoning": {"effort": "low"}, "service_tier": "priority",
+        "tools": [{"type": "function", "name": "lookup", "strict": True,
+                   "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}],
+        "tool_choice": "required",
         "input": [
             {"role": "system", "content": "first system"},
             {"type": "message", "role": "system", "content": [{"type": "input_text", "text": "second system"}]},
+            {"role": "developer", "content": "developer authority"},
             {"role": "user", "content": "hello"},
+            {"type": "function_call", "call_id": "call_1", "name": "lookup", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_1", "output": "lookup result"},
         ],
     }
+    original = json.loads(json.dumps(payload))
     adapted = _adapt_system_messages(payload)
     assert adapted["instructions"] == "existing instructions\n\nfirst system\n\nsecond system"
-    assert adapted["input"] == [{"role": "user", "content": "hello"}]
-    assert payload["instructions"] == "existing instructions"
-    assert len(payload["input"]) == 3
+    assert adapted["input"] == original["input"][2:]
+    for key in ("model", "reasoning", "service_tier", "tools", "tool_choice"):
+        assert adapted[key] == original[key]
+    assert payload == original
     assert _adapt_system_messages(adapted) == adapted
 
 
@@ -195,7 +211,7 @@ def test_instruction_adaptation_does_not_discard_nontext_content(model: str) -> 
     assert _adapt_system_messages(payload) is payload
 
 
-@pytest.mark.parametrize("model", ["gpt-5.4", "gpt-5.5", "unknown-model"])
+@pytest.mark.parametrize("model", ["gpt-5.4", "gpt-5.4-mini", "unknown-model"])
 def test_instruction_adaptation_leaves_other_models_unchanged(model: str) -> None:
     payload = {"model": model, "input": [{"role": "system", "content": "system authority"}]}
     assert _adapt_system_messages(payload) is payload
