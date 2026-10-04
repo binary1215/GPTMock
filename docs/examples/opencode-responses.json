@@ -1,0 +1,30 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "gptmock-test/test-gptmock",
+  "small_model": "gptmock-test/test-gptmock",
+  "provider": {
+    "gptmock-test": {
+      "npm": "@ai-sdk/openai",
+      "name": "GPTMock through LiteLLM (Responses)",
+      "options": {
+        "baseURL": "{env:LITELLM_BASE_URL}",
+        "apiKey": "{env:LITELLM_API_KEY}",
+        "setCacheKey": true
+      },
+      "models": {
+        "test-gptmock": {
+          "name": "GPTMock isolated test",
+          "reasoning": true,
+          "tool_call": true,
+          "limit": {"context": 64000, "output": 4096},
+          "options": {
+            "forceReasoning": true,
+            "reasoningEffort": "medium",
+            "store": false,
+            "include": ["reasoning.encrypted_content"]
+          }
+        }
+      }
+    }
+  }
+}

@@ -125,9 +125,33 @@ Runtime revision `7ddc3b392cd7cb087e996cf9189f391895755825` was built into an is
 | Direct Ollama streaming | Expected text, final done flag, standard token counters, and detailed usage present; this smoke did not exercise opaque Ollama replay |
 | Gateway repeated stable-prefix Responses | Both requests reported 8,863 input tokens; cached tokens increased from 4,864 to 7,936; both returned the expected marker |
 
-The reasoning/tool probe used a small constraint-solving task and auto tool selection. A simpler forced tool call returned zero reasoning tokens and no encrypted item, so it was not counted as replay evidence. The live tests returned one encrypted reasoning item per first turn; multiple-item order/deduplication and malformed inputs are covered by offline tests, not this live sample. Final offline validation was **761 passed, 114 skipped**, plus Ruff. The raw Chat gateway path is not the separate LiteLLM Responses-to-Chat converter or a third-party client's stream aggregation. No coding-client end-to-end, failover, long-context, or billing comparison was performed.
+The reasoning/tool probe used a small constraint-solving task and auto tool selection. A simpler forced tool call returned zero reasoning tokens and no encrypted item, so it was not counted as replay evidence. The live tests returned one encrypted reasoning item per first turn; multiple-item order/deduplication and malformed inputs are covered by offline tests, not this live sample. Final offline validation was **761 passed, 114 skipped**, plus Ruff. The raw Chat gateway path is not the separate LiteLLM Responses-to-Chat converter or a third-party client's stream aggregation. That initial check did not include a coding client; the subsequent OpenCode check is described below. Failover, long-context, and billing comparisons remain untested.
 
 The isolated test used a private access-token snapshot without a refresh token to avoid competing refreshes against production. It therefore has a finite lifetime and needs its own authentication lifecycle before long-term operation. Replay and cached-token observations do not remove that operational limitation.
+
+### OpenCode client validation: 2026-10-05 (KST)
+
+Use **`@ai-sdk/openai` (Responses)** for this setup, not `@ai-sdk/openai-compatible` (Chat). Both can complete ordinary coding tasks, but the Chat adapter in the tested client drops GPTMock's opaque `reasoning_items` extension. Successful file edits alone are therefore insufficient evidence of reasoning continuity. See the [official custom-provider documentation](https://opencode.ai/docs/providers/#custom-provider) and the [sanitized test report](validation/opencode-2026-10-05.json).
+
+The isolated fixture required sorting and merging inclusive intervals without mutating caller arrays. OpenCode read the files, observed failing tests, edited the implementation, and reran the tests. A new CLI invocation resumed the same session and added a reference-isolation regression. A separate run with the 1.3.13 binary added another test. Independent execution of the final suite passed **6/6** tests; existing tests were not weakened. Two attempted shell-based patches were denied by the test's command policy; both runs recovered through the allowed file-edit tool.
+
+| Client and route | Real requests | Coding result | Opaque state and cache observations |
+| --- | --- | --- | --- |
+| OpenCode 1.18.34, Responses | 12, all HTTP 200 | Read, fix, test, restart CLI and resume session | 11 requests replayed encrypted state; up to 7 payloads in one request matched prior response hashes; 10 requests reported cache hits |
+| OpenCode 1.18.34, Chat control | 6, all HTTP 200 | Read-only review and test execution succeeded | 2 responses contained opaque state, but no request replayed it; 5 requests still reported cache hits |
+| OpenCode 1.3.13, Responses | 7, all HTTP 200 | Read, add regression test, run tests | 6 requests replayed encrypted state; up to 4 payloads matched; 6 requests reported cache hits |
+
+Each Responses session kept one stable explicit cache key, sent `reasoning.effort: medium`, and used `store: false`. The largest reported cached-input counts were 13,056 tokens for the latest client and 12,032 for 1.3.13. Cache hits in the Chat control demonstrate that cache eligibility and opaque reasoning replay are separate properties; neither a missing reasoning item nor its preservation alone establishes billing or quality impact.
+
+The audit proxy forwarded request/response body bytes between OpenCode and LiteLLM and compared SHA-256 fingerprints of encrypted payloads in memory. It did not modify model payloads or store plaintext prompts, credentials, or opaque values in the report. This verifies the observed OpenCode/gateway boundary and accepted continuations, not every possible item ordering, compaction behavior, or upstream reasoning revision. Tests used official CLI binaries in separate containers; the existing OpenChamber installation/configuration was not changed, and its GUI/plugins were not exercised.
+
+#### Configuration for both tested OpenCode versions
+
+Use [the secret-free example](examples/opencode-responses.json) in an isolated project or merge only its provider block into your existing configuration. Set `LITELLM_BASE_URL` to the reachable gateway base ending in `/v1`, and supply an authorized key through `LITELLM_API_KEY`; do not commit the key. Select `gptmock-test/test-gptmock`. The alias must already be configured in LiteLLM. The example's 64,000/4,096 context/output limits are conservative test settings, not claims about provider model limits.
+
+For the custom alias `test-gptmock`, **OpenCode 1.3.13 needs explicit model option `forceReasoning: true` and provider option `setCacheKey: true`** to preserve the intended medium effort and session-key behavior. The newer client already selected these behaviors without the two explicit compatibility flags in the live test; the example includes them for the older version. `reasoning: true` capability by itself is not sufficient for the older SDK to recognize an arbitrary alias. Keep `store: false` and preserve encrypted reasoning; GPTMock does not implement a response store. [1.3.13 cache-key selection](https://github.com/anomalyco/opencode/blob/6314f09c14fdd6a3ab8bedc4f7b7182647551d12/packages/opencode/src/provider/transform.ts#L785), [SDK force-reasoning override](https://github.com/vercel/ai/blob/%40ai-sdk/openai%403.0.48/packages/openai/src/responses/openai-responses-language-model.ts#L177)
+
+No OpenCode fork or gateway upgrade was needed for the successful Responses route. This check does not certify other clients, the LiteLLM Responses-to-Chat converter, long-context compaction, images, failover, or cost/quality improvements. Retest adapter behavior when upgrading client or gateway versions.
 
 ## Related projects reviewed
 

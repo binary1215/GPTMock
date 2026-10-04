@@ -1,0 +1,91 @@
+{
+  "date_kst": "2026-10-05",
+  "gateway_version": "1.103.1",
+  "model": "gpt-5.6-luna",
+  "gateway_alias": "test-gptmock",
+  "gptmock_revision": "7ddc3b392cd7cb087e996cf9189f391895755825",
+  "method": "Isolated OpenCode CLI containers; HTTP body bytes forwarded through an in-memory audit proxy to LiteLLM. Encrypted payload SHA-256 comparison at the OpenCode/gateway boundary; no plaintext prompts, API keys or opaque values in this report.",
+  "groups": [
+    {
+      "case": "opencode-1.18.34-responses-fix-and-resume",
+      "request_count": 12,
+      "endpoint": "/v1/responses",
+      "http_status_counts": {
+        "200": 12
+      },
+      "requests_replaying_encrypted_content": 11,
+      "all_replayed_payload_hashes_matched_prior_response": true,
+      "maximum_replayed_encrypted_payloads_in_one_request": 7,
+      "responses_containing_encrypted_content": 7,
+      "distinct_explicit_cache_keys": 1,
+      "requests_with_cache_hit": 10,
+      "max_reported_cached_tokens": 13056,
+      "all_native_requests_store_false": true,
+      "all_requests_medium_effort": true
+    },
+    {
+      "case": "opencode-1.18.34-chat-readonly-control",
+      "request_count": 6,
+      "endpoint": "/v1/chat/completions",
+      "http_status_counts": {
+        "200": 6
+      },
+      "requests_replaying_encrypted_content": 0,
+      "all_replayed_payload_hashes_matched_prior_response": true,
+      "maximum_replayed_encrypted_payloads_in_one_request": 0,
+      "responses_containing_encrypted_content": 2,
+      "distinct_explicit_cache_keys": 0,
+      "requests_with_cache_hit": 5,
+      "max_reported_cached_tokens": 9984,
+      "all_native_requests_store_false": null,
+      "all_requests_medium_effort": true
+    },
+    {
+      "case": "opencode-1.3.13-responses-add-test",
+      "request_count": 7,
+      "endpoint": "/v1/responses",
+      "http_status_counts": {
+        "200": 7
+      },
+      "requests_replaying_encrypted_content": 6,
+      "all_replayed_payload_hashes_matched_prior_response": true,
+      "maximum_replayed_encrypted_payloads_in_one_request": 4,
+      "responses_containing_encrypted_content": 4,
+      "distinct_explicit_cache_keys": 1,
+      "requests_with_cache_hit": 6,
+      "max_reported_cached_tokens": 12032,
+      "all_native_requests_store_false": true,
+      "all_requests_medium_effort": true
+    }
+  ],
+  "tool_events": {
+    "fix": {
+      "read:completed": 3,
+      "bash:completed": 2,
+      "bash:error": 1,
+      "edit:completed": 1
+    },
+    "followup": {
+      "read:completed": 1,
+      "edit:completed": 1,
+      "bash:completed": 1
+    },
+    "chat": {
+      "glob:completed": 1,
+      "read:completed": 3,
+      "bash:completed": 1
+    },
+    "legacy": {
+      "read:completed": 3,
+      "bash:error": 1,
+      "edit:completed": 1,
+      "bash:completed": 1
+    }
+  },
+  "limitations": [
+    "No production OpenChamber configuration change or GUI test",
+    "No long-context compaction, multimodal, failover, billing, or quality benchmark",
+    "Hash checks establish payload preservation, not ordering or completeness of every upstream reasoning revision",
+    "Chat has no replayed encrypted items; its all-hashes-matched value is vacuous, not a replay success"
+  ]
+}
