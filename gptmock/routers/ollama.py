@@ -4,10 +4,11 @@ import datetime
 import json
 import logging
 from collections.abc import AsyncGenerator
+from copy import deepcopy
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from gptmock.core.dependencies import get_http_client, get_settings
@@ -49,6 +50,11 @@ def _build_openai_payload(ollama_payload: dict[str, Any], model: str) -> dict[st
         "messages": messages,
         "stream": stream_req,
     }
+    if stream_req:
+        openai_payload["stream_options"] = {"include_usage": True}
+    for key in ("reasoning_replay", "prompt_cache_key", "client_metadata"):
+        if key in ollama_payload:
+            openai_payload[key] = deepcopy(ollama_payload[key])
 
     reasoning_effort = ollama_payload.get("reasoning_effort")
     think = ollama_payload.get("think")
@@ -151,6 +157,17 @@ def _ollama_policy_headers(
     return {"X-GPTMock-Omitted-Parameters": "options.num_predict"}
 
 
+def _attach_ollama_usage(result: dict[str, Any], usage: Any) -> None:
+    """Expose reported Chat usage without estimating counters or durations."""
+    if not isinstance(usage, dict):
+        return
+    result["usage"] = deepcopy(usage)
+    for source, target in (("prompt_tokens", "prompt_eval_count"), ("completion_tokens", "eval_count")):
+        value = usage.get(source)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            result[target] = value
+
+
 async def _convert_openai_to_ollama_stream(
     response: Any, model: str,
 ) -> AsyncGenerator[bytes]:
@@ -159,6 +176,8 @@ async def _convert_openai_to_ollama_stream(
     done_reason: str | None = None
     terminal_seen = False
     pending_tools: dict[int, dict[str, Any]] = {}
+    usage: dict[str, Any] | None = None
+    reasoning_items: list[Any] | None = None
     try:
         async for sse_chunk in response:
             if not sse_chunk.startswith(b"data: "):
@@ -191,6 +210,9 @@ async def _convert_openai_to_ollama_stream(
                     done_chunk["done_reason"] = done_reason
                 if service_tier is not None:
                     done_chunk["service_tier"] = service_tier
+                if reasoning_items is not None:
+                    done_chunk["message"]["reasoning_items"] = deepcopy(reasoning_items)
+                _attach_ollama_usage(done_chunk, usage)
                 yield (json.dumps(done_chunk) + "\n").encode("utf-8")
                 break
 
@@ -204,6 +226,10 @@ async def _convert_openai_to_ollama_stream(
                     response_model = openai_chunk["model"]
                 if isinstance(openai_chunk.get("service_tier"), str):
                     service_tier = openai_chunk["service_tier"]
+                if isinstance(openai_chunk.get("usage"), dict):
+                    if usage is None:
+                        usage = {}
+                    usage.update(deepcopy(openai_chunk["usage"]))
                 choices = openai_chunk.get("choices", [])
 
                 if choices:
@@ -211,6 +237,8 @@ async def _convert_openai_to_ollama_stream(
                     if isinstance(finish_reason, str):
                         done_reason = finish_reason
                     delta = choices[0].get("delta", {})
+                    if isinstance(delta.get("reasoning_items"), list):
+                        reasoning_items = deepcopy(delta["reasoning_items"])
                     content = delta.get("content", "")
                     reasoning = delta.get("reasoning_content") or delta.get("reasoning")
                     tool_calls = delta.get("tool_calls")
@@ -250,7 +278,7 @@ def _convert_openai_to_ollama_response(
 ) -> dict[str, Any]:
     choice = response.get("choices", [{}])[0]
     source_message = choice.get("message", {})
-    message = dict(source_message) if isinstance(source_message, dict) else {}
+    message = deepcopy(source_message) if isinstance(source_message, dict) else {}
     message["content"] = message.get("content") or ""
     if message.get("tool_calls"):
         message["tool_calls"] = native_tool_calls(message["tool_calls"])
@@ -267,6 +295,7 @@ def _convert_openai_to_ollama_response(
     }
     if response.get("service_tier") is not None:
         result["service_tier"] = response["service_tier"]
+    _attach_ollama_usage(result, response.get("usage"))
     return result
 
 
@@ -283,6 +312,8 @@ async def _convert_openai_to_ollama_generate_stream(
         thinking = message.get("thinking")
         if isinstance(thinking, str) and thinking:
             chunk["thinking"] = thinking
+        if "reasoning_items" in message:
+            chunk["reasoning_items"] = message["reasoning_items"]
         yield (json.dumps(chunk) + "\n").encode("utf-8")
 
 
@@ -295,6 +326,8 @@ def _convert_openai_to_ollama_generate_response(
     thinking = message.get("thinking")
     if isinstance(thinking, str) and thinking:
         chat_response["thinking"] = thinking
+    if "reasoning_items" in message:
+        chat_response["reasoning_items"] = message["reasoning_items"]
     return chat_response
 
 
@@ -395,6 +428,7 @@ async def ollama_show(
 @router.post("/api/chat")
 async def ollama_chat(
     body: OllamaChatRequest,
+    request: Request,
     settings: Settings = Depends(get_settings),
     http_client: httpx.AsyncClient = Depends(get_http_client),
 ):
@@ -425,6 +459,7 @@ async def ollama_chat(
             payload=openai_payload,
             settings=settings,
             http_client=http_client,
+            client_session_id=request.headers.get("session_id"),
         )
 
         # 4. Convert response to Ollama format
@@ -458,6 +493,7 @@ async def ollama_chat(
 @router.post("/api/generate")
 async def ollama_generate(
     body: OllamaGenerateRequest,
+    request: Request,
     settings: Settings = Depends(get_settings),
     http_client: httpx.AsyncClient = Depends(get_http_client),
 ):
@@ -486,6 +522,7 @@ async def ollama_generate(
             payload=openai_payload,
             settings=settings,
             http_client=http_client,
+            client_session_id=request.headers.get("session_id"),
         )
 
         if is_streaming:

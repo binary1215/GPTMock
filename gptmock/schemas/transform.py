@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from typing import Any
 
 
@@ -117,6 +118,8 @@ def convert_ollama_messages(
             continue
         role = m.get("role") or "user"
         nm: dict[str, Any] = {"role": role}
+        if role == "assistant" and "reasoning_items" in m:
+            nm["reasoning_items"] = deepcopy(m["reasoning_items"])
 
         content = m.get("content")
         images_raw = m.get("images")
