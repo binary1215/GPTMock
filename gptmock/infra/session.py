@@ -12,6 +12,26 @@ _ORDER: list[str] = []
 _MAX_ENTRIES = 10000
 
 
+def resolve_client_session_id(payload: dict[str, Any], client_supplied: str | None = None) -> str | None:
+    """Prefer the transport session header, then an explicit body session ID."""
+    if isinstance(client_supplied, str) and client_supplied.strip():
+        return client_supplied.strip()
+    metadata = payload.get("client_metadata")
+    if isinstance(metadata, dict):
+        session_id = metadata.get("session_id")
+        if isinstance(session_id, str) and session_id.strip():
+            return session_id.strip()
+    return None
+
+
+def resolve_prompt_cache_key(payload: dict[str, Any], session_id: str) -> str:
+    """Keep a caller's cache key independent from routing/session identity."""
+    key = payload.get("prompt_cache_key")
+    if key is not None and not isinstance(key, str):
+        raise ValueError("prompt_cache_key must be a string")
+    return key if isinstance(key, str) and key.strip() else session_id
+
+
 def _canonicalize_first_user_message(input_items: list[dict[str, Any]]) -> dict[str, Any] | None:
     """Extract the first stable user message from Responses input items. Good use for a fingerprint for prompt caching.
     """

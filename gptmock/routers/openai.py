@@ -44,6 +44,7 @@ def _output_token_headers(
 
 @router.post("/v1/chat/completions")
 async def chat_completions(
+    request: Request,
     body: ChatCompletionRequest,
     settings: Settings = Depends(get_settings),
     http_client: httpx.AsyncClient = Depends(get_http_client),
@@ -68,6 +69,7 @@ async def chat_completions(
             payload=payload,
             settings=settings,
             http_client=http_client,
+            client_session_id=request.headers.get("session_id"),
         )
 
         # 3. Return appropriate response type
@@ -98,6 +100,7 @@ async def chat_completions(
 
 @router.post("/v1/completions")
 async def completions(
+    request: Request,
     body: TextCompletionRequest,
     settings: Settings = Depends(get_settings),
     http_client: httpx.AsyncClient = Depends(get_http_client),
@@ -120,6 +123,7 @@ async def completions(
             payload=payload,
             settings=settings,
             http_client=http_client,
+            client_session_id=request.headers.get("session_id"),
         )
 
         # 3. Return appropriate response type

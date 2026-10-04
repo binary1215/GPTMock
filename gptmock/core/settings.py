@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     reasoning_effort: str = "medium"
     reasoning_summary: str = "auto"
     reasoning_compat: str = "standard"
+    reasoning_replay: bool = False
     debug_model: str | None = None
     expose_reasoning_models: bool = False
     default_web_search: bool = False

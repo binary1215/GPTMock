@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
 
-def extract_usage(evt: dict[str, Any]) -> dict[str, int] | None:
+def extract_usage(evt: dict[str, Any]) -> dict[str, Any] | None:
     """Extract and normalise usage from an upstream ChatGPT Responses-API event.
 
     The upstream payload nests usage under ``evt["response"]["usage"]`` with
@@ -19,7 +20,15 @@ def extract_usage(evt: dict[str, Any]) -> dict[str, int] | None:
         pt = int(usage.get("input_tokens") or 0)
         ct = int(usage.get("output_tokens") or 0)
         tt = int(usage.get("total_tokens") or (pt + ct))
-        return {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt}
+        result: dict[str, Any] = {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": tt}
+        for source, target in (
+            ("input_tokens_details", "prompt_tokens_details"),
+            ("output_tokens_details", "completion_tokens_details"),
+        ):
+            details = usage.get(source)
+            if isinstance(details, dict):
+                result[target] = deepcopy(details)
+        return result
     except Exception:
         return None
 

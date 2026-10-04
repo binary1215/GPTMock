@@ -423,15 +423,16 @@ class TestResponsesHelpers:
         should_break = _handle_response_terminal(state, {"response": {"error": {"message": "boom"}}}, "response.failed")
         assert should_break is True
         assert state.error_message == "boom"
-        assert state.image_generations == [
+        assert state.output_items[1] == (
+            None,
             {
                 "type": "image_generation_call",
                 "id": "ig_1",
                 "status": "completed",
                 "revised_prompt": "a red circle",
                 "result": "iVBORw0KGgo=",
-            }
-        ]
+            },
+        )
 
         incomplete = CollectorState()
         assert _handle_response_terminal(
@@ -448,17 +449,17 @@ class TestResponsesHelpers:
             status="completed",
             final_response_obj={
                 "usage": {"total_tokens": 3},
-                "output": [{"type": "message", "content": [{"type": "output_text", "text": "final", "annotations": [{"kind": "url"}]}]}],
+                "output": [
+                    {"type": "message", "content": [{"type": "output_text", "text": "final", "annotations": [{"kind": "url"}]}]},
+                    {"type": "function_call", "name": "lookup"},
+                    {
+                        "type": "image_generation_call",
+                        "id": "ig_1",
+                        "status": "completed",
+                        "result": "iVBORw0KGgo=",
+                    },
+                ],
             },
-            function_calls=[{"type": "function_call", "name": "lookup"}],
-            image_generations=[
-                {
-                    "type": "image_generation_call",
-                    "id": "ig_1",
-                    "status": "completed",
-                    "result": "iVBORw0KGgo=",
-                }
-            ],
             reasoning_summary_text="sum",
             reasoning_full_text="full",
         )

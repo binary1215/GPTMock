@@ -23,7 +23,7 @@ from gptmock.core.constants import (
 from gptmock.core.logging import log_json
 from gptmock.core.settings import Settings
 from gptmock.infra.auth import get_effective_chatgpt_auth
-from gptmock.infra.session import ensure_session_id
+from gptmock.infra.session import ensure_session_id, resolve_client_session_id, resolve_prompt_cache_key
 from gptmock.services.chat import ChatCompletionError, apply_output_token_policy, normalize_requested_model
 from gptmock.services.model_registry import (
     apply_model_overrides,
@@ -206,8 +206,7 @@ class CollectorState:
     full_text: str = ""
     reasoning_summary_text: str = ""
     reasoning_full_text: str = ""
-    function_calls: list[dict[str, Any]] = field(default_factory=list)
-    image_generations: list[dict[str, Any]] = field(default_factory=list)
+    output_items: list[tuple[int | None, dict[str, Any]]] = field(default_factory=list)
     annotations: list[dict[str, Any]] = field(default_factory=list)
     error_message: str | None = None
 
@@ -263,23 +262,31 @@ def _handle_output_item_done(state: CollectorState, evt: dict[str, Any]) -> None
     if not isinstance(item, dict):
         return
 
-    if item.get("type") == "image_generation_call":
-        state.image_generations.append(dict(item))
-        return
+    output_index = evt.get("output_index")
+    if type(output_index) is not int or output_index < 0:
+        output_index = None
+    identity = item.get("id") or item.get("call_id")
+    for position, (existing_index, existing_item) in enumerate(state.output_items):
+        same_index = output_index is not None and existing_index == output_index
+        same_identity = identity and identity == (existing_item.get("id") or existing_item.get("call_id"))
+        if same_index or same_identity:
+            state.output_items[position] = (output_index if output_index is not None else existing_index, copy.deepcopy(item))
+            return
+    state.output_items.append((output_index, copy.deepcopy(item)))
 
-    if item.get("type") != "function_call":
-        return
 
-    fc: dict[str, Any] = {
-        "type": "function_call",
-        "status": item.get("status")
-        if isinstance(item.get("status"), str)
-        else "completed",
-    }
-    for key in ("id", "call_id", "name", "arguments"):
-        if isinstance(item.get(key), str):
-            fc[key] = item.get(key)
-    state.function_calls.append(fc)
+def _upstream_output(state: CollectorState) -> list[dict[str, Any]] | None:
+    """Prefer the terminal snapshot; otherwise replay complete items in output order."""
+    if isinstance(state.final_response_obj, dict):
+        output = state.final_response_obj.get("output")
+        if isinstance(output, list):
+            return output
+    if not state.output_items:
+        return None
+    return [
+        item
+        for _, item in sorted(state.output_items, key=lambda entry: (entry[0] is None, entry[0] or 0))
+    ]
 
 
 def _handle_content_part_done(state: CollectorState, evt: dict[str, Any]) -> None:
@@ -338,9 +345,13 @@ def _build_responses_api_result(
 ) -> dict[str, Any]:
     """Build the final Responses API response dict from collector state."""
 
-    full_text = state.full_text
-    if not full_text:
-        full_text = _extract_output_text_from_response(state.final_response_obj)
+    upstream_output = _upstream_output(state)
+    has_terminal_output = isinstance(state.final_response_obj, dict) and isinstance(
+        state.final_response_obj.get("output"), list,
+    )
+    full_text = "" if has_terminal_output else state.full_text
+    if has_terminal_output or not full_text:
+        full_text = _extract_output_text_from_response({"output": upstream_output})
 
     strict_json_text = _is_strict_json_text_format(request_text_obj)
     rendered_text = _apply_reasoning_text(
@@ -352,8 +363,8 @@ def _build_responses_api_result(
     )
 
     annotations = list(state.annotations)
-    if not annotations and isinstance(state.final_response_obj, dict):
-        for _item in state.final_response_obj.get("output") or []:
+    if not annotations:
+        for _item in upstream_output or []:
             if isinstance(_item, dict) and _item.get("type") == "message":
                 for _part in _item.get("content") or []:
                     if isinstance(_part, dict) and _part.get("type") == "output_text":
@@ -362,8 +373,9 @@ def _build_responses_api_result(
                             annotations.extend(_ann)
 
     response = copy.deepcopy(state.final_response_obj) if isinstance(state.final_response_obj, dict) else {}
-    output = response.get("output") if isinstance(response.get("output"), list) else None
+    output = copy.deepcopy(upstream_output)
     if output is not None:
+        response["output"] = output
         message_found = False
         text_part_found = False
         for item in output:
@@ -382,7 +394,7 @@ def _build_responses_api_result(
             if text_part_found:
                 break
 
-        if rendered_text and not text_part_found:
+        if rendered_text and not text_part_found and not has_terminal_output:
             content_item: dict[str, Any] = {
                 "type": "output_text",
                 "text": rendered_text,
@@ -407,26 +419,6 @@ def _build_responses_api_result(
                     },
                 )
 
-        existing_keys = {
-            (
-                item.get("type"),
-                item.get("call_id") or item.get("id"),
-            )
-            for item in output
-            if isinstance(item, dict) and (item.get("call_id") or item.get("id"))
-        }
-        for candidate in (*state.function_calls, *state.image_generations):
-            candidate_key = (
-                candidate.get("type"),
-                candidate.get("call_id") or candidate.get("id"),
-            )
-            if candidate in output:
-                continue
-            if candidate_key[1] and candidate_key in existing_keys:
-                continue
-            output.append(copy.deepcopy(candidate))
-            if candidate_key[1]:
-                existing_keys.add(candidate_key)
     else:
         content_item: dict[str, Any] = {"type": "output_text", "text": rendered_text}
         if annotations:
@@ -439,8 +431,6 @@ def _build_responses_api_result(
                 "content": [content_item],
             },
         ]
-        output.extend(state.function_calls)
-        output.extend(state.image_generations)
         response["output"] = output
 
     response.setdefault("id", state.response_id)
@@ -555,11 +545,12 @@ async def _collect_non_stream_state(upstream: httpx.Response) -> CollectorState:
 
 def _view_image_followup_input(
     input_items: list[dict[str, Any]],
-    function_calls: list[dict[str, Any]],
+    output_items: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    followup = list(input_items)
-    for call in function_calls:
-        followup.append(call)
+    followup = copy.deepcopy(input_items) + copy.deepcopy(output_items)
+    for call in output_items:
+        if not (isinstance(call, dict) and is_view_image_tool_call(call)):
+            continue
         call_id = call.get("call_id") or call.get("id")
         output = execute_view_image(call.get("arguments"))
         if isinstance(call_id, str) and call_id:
@@ -628,7 +619,7 @@ async def process_responses_api(
             },
         ]
     elif isinstance(raw_input_items, list):
-        input_items = raw_input_items
+        input_items = copy.deepcopy(raw_input_items)
     elif raw_input_items is None:
         input_items = []
     else:
@@ -662,6 +653,16 @@ async def process_responses_api(
     parallel_tool_calls = bool(payload.get("parallel_tool_calls", False))
     text_obj = payload.get("text") if isinstance(payload.get("text"), dict) else None
 
+    session_id = ensure_session_id(instructions, input_items, resolve_client_session_id(payload, client_session_id))
+    try:
+        prompt_cache_key = resolve_prompt_cache_key(payload, session_id)
+    except ValueError as exc:
+        raise ChatCompletionError(
+            str(exc),
+            status_code=400,
+            error_data={"error": {"message": str(exc), "param": "prompt_cache_key"}},
+        ) from exc
+
     access_token, account_id = await get_effective_chatgpt_auth()
     if not access_token or not account_id:
         raise ChatCompletionError(
@@ -673,8 +674,6 @@ async def process_responses_api(
                 },
             },
         )
-
-    session_id = ensure_session_id(instructions, input_items, client_session_id)
 
     include = (
         [item for item in payload.get("include", []) if isinstance(item, str)]
@@ -697,7 +696,7 @@ async def process_responses_api(
         "reasoning": reasoning_param,
         "store": bool(payload.get("store", False)),
         "stream": True,
-        "prompt_cache_key": payload.get("prompt_cache_key") or session_id,
+        "prompt_cache_key": prompt_cache_key,
     }
     for key in (
         "background",
@@ -751,11 +750,15 @@ async def process_responses_api(
     for _ in range(_MAX_VIEW_IMAGE_FOLLOWUPS):
         if state.status != "completed" or state.error_message or not view_image_enabled:
             break
-        if not state.function_calls or not all(is_view_image_tool_call(call) for call in state.function_calls):
+        output_items = _upstream_output(state) or []
+        function_calls = [
+            item for item in output_items if isinstance(item, dict) and item.get("type") == "function_call"
+        ]
+        if not function_calls or not all(is_view_image_tool_call(call) for call in function_calls):
             break
         upstream_payload["input"] = _view_image_followup_input(
             upstream_payload["input"],
-            state.function_calls,
+            output_items,
         )
         try:
             upstream = await send_upstream_request(

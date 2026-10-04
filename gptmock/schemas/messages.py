@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from copy import deepcopy
 from typing import Any
 
 _TOOL_NAME_LIMIT = 64
@@ -193,8 +194,12 @@ def convert_chat_messages_to_responses_input(
     messages: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     input_items: list[dict[str, Any]] = []
-    for message in messages:
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            raise ValueError(f"messages[{index}] must be an object")
         role = message.get("role")
+        if "reasoning_items" in message:
+            input_items.extend(_validate_reasoning_items(message, index))
         if role == "tool":
             tool_item = _convert_tool_message(message)
             if tool_item:
@@ -213,6 +218,35 @@ def convert_chat_messages_to_responses_input(
             {"type": "message", "role": role_out, "content": content_items},
         )
     return input_items
+
+
+def _validate_reasoning_items(message: dict[str, Any], message_index: int) -> list[dict[str, Any]]:
+    """Validate the replay envelope without interpreting opaque reasoning state."""
+    path = f"messages[{message_index}].reasoning_items"
+    if message.get("role") != "assistant":
+        raise ValueError(f"{path} is only supported on assistant messages")
+    items = message["reasoning_items"]
+    if not isinstance(items, list):
+        raise ValueError(f"{path} must be an array")
+    for index, item in enumerate(items):
+        item_path = f"{path}[{index}]"
+        if not isinstance(item, dict) or item.get("type") != "reasoning":
+            raise ValueError(f"{item_path} must be a reasoning item object")
+        if "id" in item and (not isinstance(item["id"], str) or not item["id"]):
+            raise ValueError(f"{item_path}.id must be a non-empty string when supplied")
+        encrypted = item.get("encrypted_content")
+        if encrypted is not None and (not isinstance(encrypted, str) or not encrypted):
+            raise ValueError(f"{item_path}.encrypted_content must be a non-empty string or null")
+        if "summary" in item:
+            summary = item["summary"]
+            if not isinstance(summary, list) or any(
+                not isinstance(part, dict)
+                or part.get("type") != "summary_text"
+                or not isinstance(part.get("text"), str)
+                for part in summary
+            ):
+                raise ValueError(f"{item_path}.summary must be an array of summary_text objects")
+    return deepcopy(items)
 
 
 def convert_tools_chat_to_responses(tools: Any) -> list[dict[str, Any]]:

@@ -505,6 +505,7 @@ def cmd_serve(
     default_web_search: bool,
     output_token_policy: str,
     cors_origins: str,
+    reasoning_replay: bool | None = None,
 ) -> int:
     if not _check_auth_storage():
         return 1
@@ -525,6 +526,8 @@ def cmd_serve(
         os.environ["GPTMOCK_REASONING_SUMMARY"] = reasoning_summary
     if reasoning_compat:
         os.environ["GPTMOCK_REASONING_COMPAT"] = reasoning_compat
+    if reasoning_replay is not None:
+        os.environ["GPTMOCK_REASONING_REPLAY"] = str(reasoning_replay).lower()
     if debug_model:
         os.environ["GPTMOCK_DEBUG_MODEL"] = debug_model
     os.environ["GPTMOCK_EXPOSE_REASONING_MODELS"] = str(expose_reasoning_models).lower()
@@ -631,6 +634,12 @@ def main() -> None:
         ),
     )
     p_serve.add_argument(
+        "--reasoning-replay",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Emit opaque reasoning_items for replay-aware Chat/Ollama clients (default: GPTMOCK_REASONING_REPLAY or off).",
+    )
+    p_serve.add_argument(
         "--expose-reasoning-models",
         action=argparse.BooleanOptionalAction,
         default=_env_truthy(
@@ -693,6 +702,7 @@ def main() -> None:
                 reasoning_effort=args.reasoning_effort,
                 reasoning_summary=args.reasoning_summary,
                 reasoning_compat=args.reasoning_compat,
+                reasoning_replay=args.reasoning_replay,
                 debug_model=args.debug_model,
                 expose_reasoning_models=args.expose_reasoning_models,
                 default_web_search=args.enable_web_search,

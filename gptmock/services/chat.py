@@ -22,7 +22,7 @@ from gptmock.core.logging import log_json
 from gptmock.core.settings import Settings
 from gptmock.core.utils import extract_usage
 from gptmock.infra.auth import get_effective_chatgpt_auth
-from gptmock.infra.session import ensure_session_id
+from gptmock.infra.session import ensure_session_id, resolve_client_session_id, resolve_prompt_cache_key
 from gptmock.infra.sse import sse_translate_chat, sse_translate_text
 from gptmock.schemas.messages import (
     convert_chat_messages_to_responses_input,
@@ -40,6 +40,7 @@ from gptmock.services.reasoning import (
     build_reasoning_param,
     extract_reasoning_from_model_name,
 )
+from gptmock.services.replay import ReasoningReplay
 from gptmock.services.upstream import UpstreamError, send_upstream_request
 from gptmock.services.upstream_errors import extract_upstream_error_message
 
@@ -60,6 +61,7 @@ class ChatCompletionContext:
     messages: list[dict[str, Any]] = field(default_factory=list)
     is_stream: bool = False
     include_usage: bool = False
+    reasoning_replay: bool = False
     reasoning_param: dict[str, Any] | None = None
     instructions: str | None = None
     tools_responses: list[dict[str, Any]] | None = None
@@ -173,10 +175,16 @@ async def _call_upstream(
         "parallel_tool_calls": bool(parallel_tool_calls),
         "store": False,
         "stream": True,
-        "prompt_cache_key": session_id,
     }
     if request_options:
         payload.update(request_options)
+    try:
+        payload["prompt_cache_key"] = resolve_prompt_cache_key(request_options or {}, session_id)
+    except ValueError as exc:
+        raise ChatCompletionError(str(exc), status_code=400, error_data={"error": {
+            "message": str(exc), "type": "invalid_request_error", "param": "prompt_cache_key",
+            "code": "invalid_parameter",
+        }}) from exc
     if include:
         payload["include"] = include
     if reasoning_param is not None:
@@ -295,6 +303,13 @@ def _extract_and_normalize(ctx: ChatCompletionContext) -> None:
         stream_options_obj if isinstance(stream_options_obj, dict) else {}
     )
     ctx.include_usage = bool(stream_options.get("include_usage", False))
+    ctx.reasoning_replay = payload.get("reasoning_replay", ctx.settings.reasoning_replay)
+    if not isinstance(ctx.reasoning_replay, bool):
+        message = "reasoning_replay must be a boolean"
+        raise ChatCompletionError(message, status_code=400, error_data={"error": {
+            "message": message, "type": "invalid_request_error", "param": "reasoning_replay",
+            "code": "invalid_parameter",
+        }})
     ctx.model = normalize_requested_model(ctx.requested_model, ctx.settings.debug_model)
 
 
@@ -413,7 +428,13 @@ def _build_upstream_request(ctx: ChatCompletionContext) -> None:
     payload = ctx.payload
     ctx.text_format = _build_text_format(payload.get("response_format"))
 
-    ctx.input_items = convert_chat_messages_to_responses_input(ctx.messages)
+    try:
+        ctx.input_items = convert_chat_messages_to_responses_input(ctx.messages)
+    except ValueError as exc:
+        raise ChatCompletionError(str(exc), status_code=400, error_data={"error": {
+            "message": str(exc), "type": "invalid_request_error", "param": "messages",
+            "code": "invalid_parameter",
+        }}) from exc
     name_map = {original: short for short, original in ctx.tool_name_reverse_map.items()}
     for item in ctx.input_items:
         if item.get("type") == "function_call" and item.get("name") in name_map:
@@ -435,6 +456,7 @@ def _chat_upstream_options(payload: dict[str, Any]) -> dict[str, Any]:
     for key in (
         "metadata",
         "previous_response_id",
+        "prompt_cache_key",
         "prompt_cache_retention",
         "safety_identifier",
         "service_tier",
@@ -508,7 +530,7 @@ async def _authenticate(ctx: ChatCompletionContext) -> None:
     ctx.session_id = ensure_session_id(
         ctx.instructions,
         ctx.input_items,
-        ctx.client_session_id,
+        resolve_client_session_id(ctx.payload, ctx.client_session_id),
     )
 
 
@@ -602,6 +624,7 @@ def _adapt_streaming_response(
         vlog=print if ctx.settings.verbose_obfuscation else None,
         reasoning_compat=ctx.settings.reasoning_compat,
         include_usage=ctx.include_usage,
+        reasoning_replay=ctx.reasoning_replay,
         tool_name_reverse=ctx.tool_name_reverse_map,
     )
     return stream_iter, True
@@ -620,8 +643,8 @@ def _decode_chat_sse_data(raw: str | bytes) -> str | None:
 def _update_chat_sse_metadata(
     evt: Any,
     response_id: str,
-    usage_obj: dict[str, int] | None,
-) -> tuple[str, dict[str, int] | None]:
+    usage_obj: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any] | None]:
     mu = extract_usage(evt)
     if mu:
         usage_obj = mu
@@ -717,6 +740,38 @@ def _handle_chat_sse_event(
             True,
         )
     if kind in (SSE_RESPONSE_COMPLETED, SSE_RESPONSE_INCOMPLETE):
+        response = evt.get("response")
+        output = response.get("output") if isinstance(response, dict) else None
+        if isinstance(output, list):
+            texts: list[str] = []
+            summaries: list[str] = []
+            tool_calls.clear()
+            annotations.clear()
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("type") == "message":
+                    content = item.get("content")
+                    for part in content if isinstance(content, list) else []:
+                        if not isinstance(part, dict) or part.get("type") != "output_text":
+                            continue
+                        if isinstance(part.get("text"), str):
+                            texts.append(part["text"])
+                        if isinstance(part.get("annotations"), list):
+                            annotations.extend(part["annotations"])
+                elif item.get("type") == "reasoning":
+                    summary = item.get("summary")
+                    for part in summary if isinstance(summary, list) else []:
+                        if isinstance(part, dict) and part.get("type") == "summary_text" and isinstance(part.get("text"), str):
+                            summaries.append(part["text"])
+                elif item.get("type") == "function_call":
+                    _handle_chat_sse_event(
+                        {"type": SSE_OUTPUT_ITEM_DONE, "item": item}, "", "", "",
+                        tool_calls, annotations, tool_name_reverse,
+                    )
+            full_text = "".join(texts)
+            if summaries:
+                reasoning_summary_text = "\n\n".join(summaries)
         return full_text, reasoning_summary_text, reasoning_full_text, None, True
     return full_text, reasoning_summary_text, reasoning_full_text, None, False
 
@@ -731,9 +786,10 @@ async def _collect_chat_sse_events(
     str,
     list[dict[str, Any]],
     str | None,
-    dict[str, int] | None,
+    dict[str, Any] | None,
     list[dict[str, Any]],
     dict[str, Any],
+    list[dict[str, Any]],
 ]:
     full_text = ""
     reasoning_summary_text = ""
@@ -741,10 +797,11 @@ async def _collect_chat_sse_events(
     response_id = "chatcmpl"
     tool_calls: list[dict[str, Any]] = []
     error_message: str | None = None
-    usage_obj: dict[str, int] | None = None
+    usage_obj: dict[str, Any] | None = None
     annotations: list[dict[str, Any]] = []
     response_metadata: dict[str, Any] = {}
     terminal_received = False
+    replay = ReasoningReplay()
 
     try:
         async for raw in upstream.aiter_lines():
@@ -766,6 +823,7 @@ async def _collect_chat_sse_events(
                 evt, response_id, usage_obj,
             )
             kind = evt.get("type")
+            replay.observe(evt)
             response = evt.get("response")
             if isinstance(response, dict):
                 for key in ("model", "service_tier", "status", "incomplete_details"):
@@ -812,6 +870,7 @@ async def _collect_chat_sse_events(
         usage_obj,
         annotations,
         response_metadata,
+        replay.items(),
     )
 
 
@@ -830,6 +889,7 @@ async def _adapt_non_streaming_response(
         usage_obj,
         annotations,
         response_metadata,
+        reasoning_items,
     ) = await _collect_chat_sse_events(upstream, ctx.tool_name_reverse_map)
 
     if error_message:
@@ -847,6 +907,8 @@ async def _adapt_non_streaming_response(
         message["annotations"] = annotations
     if tool_calls:
         message["tool_calls"] = tool_calls
+    if ctx.reasoning_replay and reasoning_items:
+        message["reasoning_items"] = reasoning_items
     if not _is_strict_json_text_format(ctx.text_format):
         message = apply_reasoning_to_message(
             message,
@@ -1013,7 +1075,7 @@ async def process_text_completion(
         )
 
     # 7. Get session ID
-    session_id = ensure_session_id(instructions, input_items, client_session_id)
+    session_id = ensure_session_id(instructions, input_items, resolve_client_session_id(payload, client_session_id))
 
     # 8. Call upstream
     try:
@@ -1076,7 +1138,7 @@ async def process_text_completion(
     # Collect full response
     full_text = ""
     response_id = "cmpl"
-    usage_obj: dict[str, int] | None = None
+    usage_obj: dict[str, Any] | None = None
     response_model: str | None = None
     service_tier: str | None = None
     finish_reason = "stop"

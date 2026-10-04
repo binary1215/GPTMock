@@ -24,6 +24,7 @@ from gptmock.core.constants import (
     SSE_RESPONSE_INCOMPLETE,
 )
 from gptmock.core.utils import extract_usage
+from gptmock.services.replay import ReasoningReplay
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ class SSEChatContext:
     vlog: Any
     include_usage: bool
     service_tier: str | None = None
+    reasoning_replay: bool = False
 
     # Mutable stream state
     response_id: str = "chatcmpl-stream"
@@ -52,10 +54,14 @@ class SSEChatContext:
     sent_stop_chunk: bool = False
     saw_any_summary: bool = False
     pending_summary_paragraph: bool = False
+    output_text: str = ""
+    reasoning_display_streamed: bool = False
     done: bool = False
-    upstream_usage: dict[str, int] | None = None
+    upstream_usage: dict[str, Any] | None = None
+    replay: ReasoningReplay = field(default_factory=ReasoningReplay)
     role_sent: bool = False
     args_streamed: dict[str, bool] = field(default_factory=dict)
+    emitted_arguments: dict[int, str] = field(default_factory=dict)
     pending_args: dict[str, list[str]] = field(default_factory=dict)
     tool_name_reverse: dict[str, str] = field(default_factory=dict)
 
@@ -234,11 +240,13 @@ def _handle_output_item_added(
         ctx.role_sent = True
 
     frames = [ctx.chunk(delta_obj)]
+    ctx.emitted_arguments.setdefault(idx, "")
 
     buffered = ctx.pending_args.pop(call_id, None) or ctx.pending_args.pop(item_id, None)
     if buffered:
         for chunk_str in buffered:
             ctx.args_streamed[call_id] = True
+            ctx.emitted_arguments[idx] += chunk_str
             frames.append(
                 ctx.chunk(
                     {"tool_calls": [{"index": idx, "function": {"arguments": chunk_str}}]},
@@ -267,6 +275,7 @@ def _handle_function_call_args_delta(
 
     ctx.args_streamed[call_id] = True
     idx = ctx.ws_idx(call_id)
+    ctx.emitted_arguments[idx] = ctx.emitted_arguments.get(idx, "") + raw
     ctx.tc_streamed.add(call_id)
 
     return [
@@ -292,26 +301,39 @@ def _handle_function_call_args_done(
     if not isinstance(call_id, str) or not call_id:
         return []
 
-    if ctx.args_streamed.get(call_id):
-        return []
-
     full_args = evt.get("arguments")
     if not isinstance(full_args, str) or not full_args:
         return []
 
     if call_id not in ctx.ws_index:
-        ctx.pending_args.setdefault(call_id, []).append(full_args)
+        buffered = ctx.pending_args.setdefault(call_id, [])
+        prefix = "".join(buffered)
+        if full_args.startswith(prefix) and len(full_args) > len(prefix):
+            buffered.append(full_args[len(prefix):])
         return []
 
-    idx = ctx.ws_idx(call_id)
     ctx.tc_streamed.add(call_id)
+    return _complete_function_arguments(ctx, call_id, full_args)
+
+
+def _complete_function_arguments(ctx: SSEChatContext, call_id: str, full_args: str) -> list[bytes]:
+    """Append only a missing suffix, using the index shared by item/call ID aliases."""
+    idx = ctx.ws_index.get(call_id)
+    if idx is None or idx not in ctx.emitted_arguments:
+        return []
+    prefix = ctx.emitted_arguments[idx]
+    if not full_args.startswith(prefix) or len(full_args) <= len(prefix):
+        return []
+    suffix = full_args[len(prefix):]
+    ctx.emitted_arguments[idx] = full_args
+    ctx.args_streamed[call_id] = True
     return [
         ctx.chunk(
             {
                 "tool_calls": [
                     {
                         "index": idx,
-                        "function": {"arguments": full_args},
+                        "function": {"arguments": suffix},
                     },
                 ],
             },
@@ -328,6 +350,7 @@ def _handle_text_delta(
     delta = evt.get("delta") or ""
     if not isinstance(delta, str) or not delta:
         return []
+    ctx.output_text += delta
     if ctx.compat == "think-tags" and ctx.think_open and not ctx.think_closed:
         out.append(ctx.chunk({"content": "</think>"}))
         ctx.think_open = False
@@ -399,6 +422,8 @@ def _handle_output_item_done(
 
     already_streamed = bool(call_id) and call_id in ctx.tc_streamed
     if already_streamed:
+        if item.get("type") == "function_call" and isinstance(raw_args, str):
+            return _complete_function_arguments(ctx, call_id, raw_args)
         return []
 
     eff_args = ctx.ws_state.get(
@@ -406,7 +431,7 @@ def _handle_output_item_done(
         raw_args if isinstance(raw_args, (dict, list, str)) else {},
     )
     try:
-        args = _serialize_tool_args(eff_args)
+        args = raw_args if item.get("type") == "function_call" and isinstance(raw_args, str) else _serialize_tool_args(eff_args)
     except Exception:
         logger.debug("Failed to serialize tool arguments", exc_info=True)
         args = "{}"
@@ -421,23 +446,24 @@ def _handle_output_item_done(
         return []
 
     ctx.tc_streamed.add(call_id)
+    ctx.emitted_arguments[idx] = args
     if isinstance(item_id, str) and item_id:
         ctx.tc_streamed.add(item_id)
 
-    return [
-        ctx.chunk(
+    delta: dict[str, Any] = {
+        "tool_calls": [
             {
-                "tool_calls": [
-                    {
-                        "index": idx,
-                        "id": call_id,
-                        "type": "function",
-                        "function": {"name": name, "arguments": args},
-                    },
-                ],
+                "index": idx,
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": args},
             },
-        ),
-    ]
+        ],
+    }
+    if not ctx.role_sent:
+        delta["role"] = "assistant"
+        ctx.role_sent = True
+    return [ctx.chunk(delta)]
 
 
 def _handle_summary_part_added(
@@ -464,6 +490,7 @@ def _handle_reasoning_delta(
     delta_txt = evt.get("delta") or ""
     if not isinstance(delta_txt, str) or not delta_txt:
         return []
+    ctx.reasoning_display_streamed = True
     out: list[bytes] = []
 
     if ctx.compat == "o3":
@@ -588,7 +615,14 @@ def _finalize_chat_stream(
 
     if not ctx.sent_stop_chunk:
         terminal = "tool_calls" if ctx.tool_call_detected and finish_reason == "stop" else finish_reason
-        out.append(ctx.chunk({}, finish_reason=terminal))
+        delta: dict[str, Any] = {}
+        reasoning_items = ctx.replay.items() if ctx.reasoning_replay else []
+        if reasoning_items:
+            delta["reasoning_items"] = reasoning_items
+            if not ctx.role_sent:
+                delta["role"] = "assistant"
+                ctx.role_sent = True
+        out.append(ctx.chunk(delta, finish_reason=terminal))
         ctx.sent_stop_chunk = True
 
     # Usage chunk
@@ -623,7 +657,42 @@ def _handle_completed(
     evt: dict[str, Any],
     kind: str,
 ) -> list[bytes]:
-    return _finalize_chat_stream(ctx, evt, "stop")
+    return _terminal_output_chunks(ctx, evt) + _finalize_chat_stream(ctx, evt, "stop")
+
+
+def _terminal_output_chunks(ctx: SSEChatContext, evt: dict[str, Any]) -> list[bytes]:
+    """Recover output present only in the terminal snapshot without re-emitting deltas."""
+    response = evt.get("response")
+    output = response.get("output") if isinstance(response, dict) else None
+    if not isinstance(output, list):
+        return []
+    out: list[bytes] = []
+    texts: list[str] = []
+    summaries: list[str] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") == "message":
+            content = item.get("content")
+            for part in content if isinstance(content, list) else []:
+                if isinstance(part, dict) and part.get("type") == "output_text" and isinstance(part.get("text"), str):
+                    texts.append(part["text"])
+        elif item.get("type") == "reasoning":
+            summary = item.get("summary")
+            for part in summary if isinstance(summary, list) else []:
+                if isinstance(part, dict) and part.get("type") == "summary_text" and isinstance(part.get("text"), str):
+                    summaries.append(part["text"])
+    if summaries and not ctx.reasoning_display_streamed:
+        out.extend(_handle_reasoning_delta(
+            ctx, {"delta": "\n\n".join(summaries)}, SSE_REASONING_SUMMARY_TEXT_DELTA,
+        ))
+    final_text = "".join(texts)
+    if final_text.startswith(ctx.output_text) and len(final_text) > len(ctx.output_text):
+        out.extend(_handle_text_delta(ctx, {"delta": final_text[len(ctx.output_text):]}, SSE_OUTPUT_TEXT_DELTA))
+    for item in output:
+        if isinstance(item, dict) and item.get("type") in ("function_call", "web_search_call"):
+            out.extend(_handle_output_item_done(ctx, {"item": item}, SSE_OUTPUT_ITEM_DONE))
+    return out
 
 
 def _handle_incomplete(
@@ -631,10 +700,15 @@ def _handle_incomplete(
     evt: dict[str, Any],
     kind: str,
 ) -> list[bytes]:
-    if ctx.tool_call_detected:
+    response = evt.get("response")
+    output = response.get("output") if isinstance(response, dict) else None
+    terminal_has_calls = isinstance(output, list) and any(
+        isinstance(item, dict) and item.get("type") in ("function_call", "web_search_call") for item in output
+    )
+    if ctx.tool_call_detected or terminal_has_calls:
         return _handle_failed(ctx, {"response": {"error": {"message":
             "Upstream response incomplete during a tool call; do not execute partial arguments"}}}, kind)
-    return _finalize_chat_stream(ctx, evt, _incomplete_finish_reason(evt))
+    return _terminal_output_chunks(ctx, evt) + _finalize_chat_stream(ctx, evt, _incomplete_finish_reason(evt))
 
 
 # ---------------------------------------------------------------------------
@@ -674,6 +748,7 @@ async def sse_translate_chat(
     reasoning_compat: str = "standard",
     *,
     include_usage: bool = False,
+    reasoning_replay: bool = False,
     tool_name_reverse: dict[str, str] | None = None,
 ) -> AsyncGenerator[bytes]:
     ctx = SSEChatContext(
@@ -683,6 +758,7 @@ async def sse_translate_chat(
         verbose=verbose,
         vlog=vlog,
         include_usage=include_usage,
+        reasoning_replay=reasoning_replay,
         tool_name_reverse=tool_name_reverse or {},
     )
 
@@ -742,6 +818,8 @@ async def sse_translate_chat(
 
             # ---- dispatch ----
             kind = evt.get("type")
+            if ctx.reasoning_replay:
+                ctx.replay.observe(evt)
             response = evt.get("response")
             if isinstance(response, dict):
                 if isinstance(response.get("id"), str):
@@ -792,7 +870,7 @@ async def sse_translate_text(
     include_usage: bool = False,
 ) -> AsyncGenerator[bytes]:
     response_id = "cmpl-stream"
-    upstream_usage: dict[str, int] | None = None
+    upstream_usage: dict[str, Any] | None = None
     service_tier: str | None = None
     done = False
 
