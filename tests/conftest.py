@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 from collections.abc import Generator
 from pathlib import Path
 
+import httpx
 import pytest
 from starlette.testclient import TestClient
 
@@ -96,6 +98,39 @@ def isolated_gptmock_home(tmp_path_factory: pytest.TempPathFactory) -> Generator
             os.environ.pop(name, None)
         else:
             os.environ[name] = value
+
+
+@pytest.fixture(autouse=True)
+def block_network_in_offline_tests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail closed if a mock is lost; live calls require explicit opt-in."""
+    if os.getenv("GPTMOCK_RUN_LIVE_TESTS") == "1":
+        return
+
+    def blocked_http(*args, **kwargs):
+        raise AssertionError("Real HTTP transport disabled in offline tests; use MockTransport or ASGITransport")
+
+    async def blocked_async_http(*args, **kwargs):
+        blocked_http()
+
+    original_connect = socket.socket.connect
+    original_connect_ex = socket.socket.connect_ex
+
+    def check_address(address):
+        if isinstance(address, tuple) and address[0] not in ("127.0.0.1", "::1", "localhost"):
+            raise AssertionError("External socket connection disabled in offline tests")
+
+    def guarded_connect(sock, address):
+        check_address(address)
+        return original_connect(sock, address)
+
+    def guarded_connect_ex(sock, address):
+        check_address(address)
+        return original_connect_ex(sock, address)
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", blocked_http)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", blocked_async_http)
+    monkeypatch.setattr(socket.socket, "connect", guarded_connect)
+    monkeypatch.setattr(socket.socket, "connect_ex", guarded_connect_ex)
 
 
 @pytest.fixture(autouse=True)
