@@ -112,7 +112,9 @@ async def _process(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("snapshot_source", ["terminal_only", "terminal_overrides_events", "item_done_fallback"])
+@pytest.mark.parametrize("snapshot_source", [
+    "terminal_only", "terminal_overrides_events", "item_done_fallback", "empty_terminal_elision",
+])
 async def test_internal_followup_replays_complete_ordered_output(
     upstream: MockUpstream,
     snapshot_source: str,
@@ -131,6 +133,8 @@ async def test_internal_followup_replays_complete_ordered_output(
     terminal = _completed(output, response_id="resp_tools")
     if snapshot_source == "item_done_fallback":
         del terminal["response"]["output"]
+    elif snapshot_source == "empty_terminal_elision":
+        terminal["response"]["output"] = []
     terminal["response"]["usage"] = {"input_tokens": 100, "output_tokens": 20, "total_tokens": 120}
     events.append(terminal)
     final = _completed([_message()])
@@ -180,7 +184,10 @@ async def test_repeated_followups_keep_each_round_once(upstream: MockUpstream) -
 @pytest.mark.asyncio
 @pytest.mark.parametrize("caller_tool", [False, True])
 async def test_terminal_snapshot_controls_internal_execution(upstream: MockUpstream, caller_tool: bool) -> None:
-    output = [_reasoning("rs_1"), _call("view"), _call("external", name="lookup")] if caller_tool else []
+    output = (
+        [_reasoning("rs_1"), _call("view"), _call("external", name="lookup")]
+        if caller_tool else [_message("terminal answer")]
+    )
     upstream.rounds = [[
         {"type": "response.output_item.done", "output_index": 0, "item": _call("stale_view")},
         _completed(output),
@@ -267,6 +274,25 @@ async def test_unindexed_items_preserve_order_and_deduplicate_call_events(upstre
 
 
 @pytest.mark.asyncio
+async def test_idless_call_enriched_with_item_id_executes_once(upstream: MockUpstream) -> None:
+    call = _call("call_x")
+    idless_call = {key: value for key, value in call.items() if key != "id"}
+    reasoning = _reasoning("rs_call")
+    upstream.rounds = [[
+        {"type": "response.output_item.done", "item": reasoning},
+        {"type": "response.output_item.done", "item": idless_call},
+        {"type": "response.output_item.done", "item": call},
+        _completed([]),
+    ], [_completed([_message()])]]
+
+    await _process({"model": "gpt-5.6-luna", "input": [], "tools": [{"type": "view_image"}]})
+
+    assert len(upstream.payloads) == 2
+    assert upstream.payloads[1]["input"] == [reasoning, call, _tool_result(call)]
+    assert upstream.executed_arguments == [call["arguments"]]
+
+
+@pytest.mark.asyncio
 async def test_fallback_returns_complete_items_for_caller_owned_tools(upstream: MockUpstream) -> None:
     output = [_reasoning("rs_caller"), _call("caller", name="lookup")]
     upstream.rounds = [[
@@ -300,6 +326,87 @@ async def test_streaming_forwards_native_reasoning_and_tool_events_unchanged(ups
     assert frames.encode() == _sse_bytes(events)
     assert len(upstream.payloads) == 1
     assert not upstream.executed_arguments
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_elided_terminal_output_recovers_live_style_completed_message(
+    upstream: MockUpstream, stream: bool,
+) -> None:
+    message = _message("completed answer")
+    terminal = _completed([])
+    terminal["sequence_number"] = 7
+    terminal["future_event_field"] = {"keep": [1, 2]}
+    terminal["response"].update({
+        "usage": {"input_tokens": 12, "output_tokens": 4, "total_tokens": 16},
+        "future_response_field": {"opaque": "untouched"},
+    })
+    events = [
+        {"type": "response.created", "response": {"id": "resp_final", "status": "in_progress", "output": []}},
+        {"type": "response.output_item.added", "output_index": 0, "item": {**message, "content": [], "status": "in_progress"}},
+        {"type": "response.content_part.added", "output_index": 0, "content_index": 0, "part": {"type": "output_text", "text": ""}},
+        {"type": "response.output_text.delta", "output_index": 0, "delta": "completed "},
+        {"type": "response.output_text.delta", "output_index": 0, "delta": "answer"},
+        {"type": "response.output_text.done", "output_index": 0, "text": "completed answer"},
+        {"type": "response.content_part.done", "output_index": 0, "part": message["content"][0]},
+        {"type": "response.output_item.done", "output_index": 0, "item": message},
+        terminal,
+    ]
+    original_events = copy.deepcopy(events)
+    upstream.rounds = [events]
+
+    result, is_streaming = await _process({"model": "gpt-5.6-luna", "input": "answer", "stream": stream})
+
+    assert is_streaming is stream
+    if stream:
+        frames = "".join([frame async for frame in result])
+        recovered_events = [json.loads(line[6:]) for line in frames.splitlines() if line.startswith("data: ")]
+        expected_terminal = copy.deepcopy(terminal)
+        expected_terminal["response"]["output"] = [message]
+        assert recovered_events == [*events[:-1], expected_terminal]
+        response = recovered_events[-1]["response"]
+    else:
+        response = result
+    assert response["output"] == [message]
+    assert response["usage"] == terminal["response"]["usage"]
+    assert response["future_response_field"] == {"opaque": "untouched"}
+    assert events == original_events
+
+
+@pytest.mark.asyncio
+async def test_streaming_repairs_elided_output_with_ordered_reasoning_and_tools(upstream: MockUpstream) -> None:
+    output = [_reasoning("rs_one"), _call("first"), _reasoning("rs_two"), _call("second")]
+    events = [
+        {"type": "response.output_item.done", "output_index": index, "item": output[index]}
+        for index in (3, 1, 2, 0, 1)
+    ] + [_completed([])]
+    upstream.rounds = [events]
+
+    result, _ = await _process({
+        "model": "gpt-5.6-luna", "input": "Inspect", "tools": [{"type": "view_image"}], "stream": True,
+    })
+    frames = "".join([frame async for frame in result])
+    recovered_events = [json.loads(line[6:]) for line in frames.splitlines() if line.startswith("data: ")]
+
+    assert recovered_events[:-1] == events[:-1]
+    assert recovered_events[-1]["response"]["output"] == output
+    assert len(upstream.payloads) == 1
+    assert not upstream.executed_arguments
+
+
+@pytest.mark.asyncio
+async def test_streaming_empty_terminal_without_done_items_does_not_replay_partial_items(upstream: MockUpstream) -> None:
+    events = [
+        {"type": "response.output_item.added", "output_index": 0, "item": _message("partial")},
+        {"type": "response.output_text.delta", "output_index": 0, "delta": "partial"},
+        _completed([]),
+    ]
+    upstream.rounds = [events]
+
+    result, _ = await _process({"model": "gpt-5.6-luna", "input": "answer", "stream": True})
+    frames = "".join([frame async for frame in result])
+
+    assert frames.encode() == _sse_bytes(events)
 
 
 @pytest.mark.asyncio

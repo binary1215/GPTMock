@@ -52,7 +52,7 @@ history += [item.model_dump(exclude_none=True) for item in first.output]
 history += [{"role": "user", "content": "Explain the next step."}]
 ```
 
-If tools were requested, append their results before a user continuation. GPTMock's non-streaming internal `view_image` loop follows the same order, retaining all output items before appending tool results. A terminal `response.output` is authoritative, even if empty; when absent, completed items are collected by output index with duplicate updates replaced. Native streaming remains caller-owned and does not execute this internal loop.
+If tools were requested, append their results before a user continuation. GPTMock's non-streaming internal `view_image` loop follows the same order, retaining all output items before appending tool results. A nonempty terminal `response.output` is authoritative. The Codex backend can instead emit complete `response.output_item.done` events followed by a terminal `output: []`; GPTMock recovers those completed items in output-index order, replacing duplicate updates. An empty terminal without completed items stays empty: partial deltas are not opaque replay state. Native streaming also fills this elided terminal output from completed items while preserving other events and terminal metadata. Streaming remains caller-owned and does not execute the internal tool loop.
 
 GPTMock does not add a persistent response store, `GET /responses/{id}`, or automatic `previous_response_id` emulation. Explicit full-history replay is the tested contract. Native usage after an internal `view_image` loop still describes the **final upstream request**, not the aggregate cost of every internal request.
 

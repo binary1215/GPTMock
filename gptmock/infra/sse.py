@@ -24,7 +24,7 @@ from gptmock.core.constants import (
     SSE_RESPONSE_INCOMPLETE,
 )
 from gptmock.core.utils import extract_usage
-from gptmock.services.replay import ReasoningReplay
+from gptmock.services.replay import OutputReplay
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class SSEChatContext:
     reasoning_display_streamed: bool = False
     done: bool = False
     upstream_usage: dict[str, Any] | None = None
-    replay: ReasoningReplay = field(default_factory=ReasoningReplay)
+    replay: OutputReplay = field(default_factory=OutputReplay)
     role_sent: bool = False
     args_streamed: dict[str, bool] = field(default_factory=dict)
     emitted_arguments: dict[int, str] = field(default_factory=dict)
@@ -616,7 +616,9 @@ def _finalize_chat_stream(
     if not ctx.sent_stop_chunk:
         terminal = "tool_calls" if ctx.tool_call_detected and finish_reason == "stop" else finish_reason
         delta: dict[str, Any] = {}
-        reasoning_items = ctx.replay.items() if ctx.reasoning_replay else []
+        reasoning_items = [
+            item for item in ctx.replay.items() if item.get("type") == "reasoning"
+        ] if ctx.reasoning_replay else []
         if reasoning_items:
             delta["reasoning_items"] = reasoning_items
             if not ctx.role_sent:
@@ -818,9 +820,12 @@ async def sse_translate_chat(
 
             # ---- dispatch ----
             kind = evt.get("type")
-            if ctx.reasoning_replay:
-                ctx.replay.observe(evt)
+            ctx.replay.observe(evt)
             response = evt.get("response")
+            if kind in (SSE_RESPONSE_COMPLETED, SSE_RESPONSE_INCOMPLETE) and isinstance(response, dict):
+                if not response.get("output") and (completed_output := ctx.replay.items()):
+                    response = {**response, "output": completed_output}
+                    evt = {**evt, "response": response}
             if isinstance(response, dict):
                 if isinstance(response.get("id"), str):
                     ctx.response_id = response.get("id") or ctx.response_id

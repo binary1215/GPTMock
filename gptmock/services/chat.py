@@ -40,7 +40,7 @@ from gptmock.services.reasoning import (
     build_reasoning_param,
     extract_reasoning_from_model_name,
 )
-from gptmock.services.replay import ReasoningReplay
+from gptmock.services.replay import OutputReplay
 from gptmock.services.upstream import UpstreamError, send_upstream_request
 from gptmock.services.upstream_errors import extract_upstream_error_message
 
@@ -801,7 +801,7 @@ async def _collect_chat_sse_events(
     annotations: list[dict[str, Any]] = []
     response_metadata: dict[str, Any] = {}
     terminal_received = False
-    replay = ReasoningReplay()
+    replay = OutputReplay()
 
     try:
         async for raw in upstream.aiter_lines():
@@ -825,6 +825,10 @@ async def _collect_chat_sse_events(
             kind = evt.get("type")
             replay.observe(evt)
             response = evt.get("response")
+            if kind in (SSE_RESPONSE_COMPLETED, SSE_RESPONSE_INCOMPLETE) and isinstance(response, dict):
+                if not response.get("output") and (completed_output := replay.items()):
+                    response = {**response, "output": completed_output}
+                    evt = {**evt, "response": response}
             if isinstance(response, dict):
                 for key in ("model", "service_tier", "status", "incomplete_details"):
                     if response.get(key) is not None:
@@ -870,7 +874,7 @@ async def _collect_chat_sse_events(
         usage_obj,
         annotations,
         response_metadata,
-        replay.items(),
+        [item for item in replay.items() if item.get("type") == "reasoning"],
     )
 
 

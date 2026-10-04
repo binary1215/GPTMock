@@ -130,7 +130,7 @@ async def test_final_snapshot_preserves_multiple_opaque_items_once(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("final_output", [None, []])
-async def test_item_done_fallback_orders_and_deduplicates_without_overriding_empty_snapshot(
+async def test_item_done_fallback_orders_and_deduplicates_when_terminal_snapshot_is_elided(
     monkeypatch: pytest.MonkeyPatch, stream: bool, final_output: list[dict[str, Any]] | None,
 ) -> None:
     first, second = _reasoning("rs_first", "first"), _reasoning(None, "second")
@@ -141,7 +141,101 @@ async def test_item_done_fallback_orders_and_deduplicates_without_overriding_emp
         _terminal(final_output),
     ]
     result, _ = await _post(monkeypatch, events, _payload(stream=stream, reasoning_replay=True))
-    assert _replay(result, stream) == ([first, second] if final_output is None else [])
+    assert _replay(result, stream) == [first, second]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("reasoning_replay", [False, True])
+async def test_codex_elided_terminal_preserves_completed_message_tools_and_reasoning(
+    monkeypatch: pytest.MonkeyPatch, stream: bool, reasoning_replay: bool,
+) -> None:
+    reasoning = [_reasoning("rs_first", "first"), _reasoning("rs_second", "second")]
+    tool = {"type": "function_call", "id": "fc_lookup", "call_id": "call_lookup", "name": "lookup", "arguments": "{}"}
+    message = {"id": "msg_answer", "status": "completed", **_message("complete answer")}
+    events = [
+        {"type": "response.output_item.done", "output_index": 3, "item": message},
+        {"type": "response.output_item.done", "output_index": 0, "item": reasoning[0]},
+        {"type": "response.output_item.done", "output_index": 1, "item": tool},
+        {"type": "response.output_item.done", "output_index": 2, "item": reasoning[1]},
+        {"type": "response.output_item.done", "output_index": 3, "item": message},
+        _terminal([], usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}),
+    ]
+    result, _ = await _post(monkeypatch, events, _payload(
+        stream=stream, reasoning_replay=reasoning_replay, stream_options={"include_usage": True},
+    ))
+    assert _replay(result, stream) == (reasoning if reasoning_replay else [])
+    if stream:
+        chunks = _chunks(result)
+        deltas = [choice["delta"] for chunk in chunks for choice in chunk["choices"]]
+        assert "".join(delta.get("content", "") for delta in deltas) == "complete answer"
+        calls = [call for delta in deltas for call in delta.get("tool_calls", [])]
+        assert len(calls) == 1
+        assert calls[0]["id"] == "call_lookup"
+        assert chunks[-1]["usage"]["total_tokens"] == 15
+    else:
+        body = result.json()
+        answer = body["choices"][0]["message"]
+        assert answer["content"] == "complete answer"
+        assert answer["tool_calls"][0]["id"] == "call_lookup"
+        assert len(answer["tool_calls"]) == 1
+        assert body["usage"]["total_tokens"] == 15
+
+
+@pytest.mark.asyncio
+async def test_nonempty_terminal_snapshot_replaces_stale_completed_chat_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    old_tool = {"type": "function_call", "call_id": "old_call", "name": "old_tool", "arguments": "{}"}
+    events = [
+        {"type": "response.output_item.done", "item": _message("old answer")},
+        {"type": "response.output_item.done", "item": old_tool},
+        {"type": "response.output_item.done", "item": _reasoning("old_reasoning", "stale")},
+        _terminal([_message("final answer")]),
+    ]
+    result, _ = await _post(monkeypatch, events, _payload(reasoning_replay=True))
+    message = result.json()["choices"][0]["message"]
+    assert message == {"role": "assistant", "content": "final answer"}
+
+
+@pytest.mark.asyncio
+async def test_empty_terminal_without_completed_items_does_not_recover_partial_chat_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    events = [
+        {"type": "response.output_text.delta", "delta": "unfinished"},
+        {"type": "response.output_item.added", "item": _reasoning("rs_partial", "not completed")},
+        _terminal([]),
+    ]
+    result, _ = await _post(monkeypatch, events, _payload(reasoning_replay=True))
+    assert result.json()["choices"][0]["message"] == {"role": "assistant", "content": None}
+
+
+def test_output_replay_preserves_all_completed_item_types_and_never_invents_delta_items() -> None:
+    replay_module = importlib.import_module("gptmock.services.replay")
+    completed = replay_module.OutputReplay()
+    reasoning = _reasoning("rs", "opaque")
+    unknown = {"type": "future_output_kind", "id": "future", "opaque_fields": {"data": [1, 2]}}
+    message = {"id": "msg", **_message("answer")}
+    originals = [reasoning, unknown, message]
+    for index in (2, 0, 1, 2):
+        completed.observe({"type": "response.output_item.done", "output_index": index, "item": originals[index]})
+    completed.observe(_terminal([]))
+    assert completed.items() == originals
+    copy = completed.items()
+    copy[1]["opaque_fields"]["data"].append(3)
+    assert completed.items() == originals
+    completed.observe(_terminal([_message("authoritative")]))
+    assert completed.items() == [_message("authoritative")]
+
+    incomplete = replay_module.OutputReplay()
+    incomplete.observe({"type": "response.output_text.delta", "delta": "unfinished"})
+    incomplete.observe({"type": "response.output_item.added", "item": reasoning})
+    incomplete.observe(_terminal([]))
+    assert incomplete.items() == []
+
+
+def test_reasoning_replay_facade_does_not_restore_stale_reasoning_over_nonempty_final_output() -> None:
+    replay = importlib.import_module("gptmock.services.replay").ReasoningReplay()
+    replay.observe({"type": "response.output_item.done", "item": _reasoning("rs", "old")})
+    replay.observe(_terminal([_message("final")]))
+    assert replay.items() == []
 
 
 @pytest.mark.asyncio

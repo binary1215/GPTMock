@@ -35,6 +35,7 @@ from gptmock.services.reasoning import (
     build_reasoning_param,
     extract_reasoning_from_model_name,
 )
+from gptmock.services.replay import OutputReplay
 from gptmock.services.upstream import UpstreamError, send_upstream_request
 from gptmock.services.upstream_errors import extract_upstream_error_message
 from gptmock.services.view_image import (
@@ -153,6 +154,7 @@ def _stream_error_event(code: str, message: str, sequence_number: int) -> str:
 async def _proxy_stream(upstream: httpx.Response) -> AsyncGenerator[str]:
     terminal_received = False
     sequence_number = 0
+    output_replay = OutputReplay()
     try:
         async for raw_line in upstream.aiter_lines():
             line = (
@@ -169,6 +171,15 @@ async def _proxy_stream(upstream: httpx.Response) -> AsyncGenerator[str]:
                     event = json.loads(data)
                 except (TypeError, ValueError):
                     event = None
+                if isinstance(event, dict):
+                    output_replay.observe(event)
+                    if event.get("type") in (SSE_RESPONSE_COMPLETED, SSE_RESPONSE_INCOMPLETE):
+                        response = event.get("response")
+                        if isinstance(response, dict) and response.get("output") == []:
+                            completed_output = output_replay.items()
+                            if completed_output:
+                                response["output"] = completed_output
+                                line = f"data: {json.dumps(event)}"
                 if isinstance(event, dict) and isinstance(event.get("sequence_number"), int):
                     sequence_number = max(sequence_number, event["sequence_number"] + 1)
                 if isinstance(event, dict) and event.get("type") in (
@@ -265,24 +276,33 @@ def _handle_output_item_done(state: CollectorState, evt: dict[str, Any]) -> None
     output_index = evt.get("output_index")
     if type(output_index) is not int or output_index < 0:
         output_index = None
-    identity = item.get("id") or item.get("call_id")
+    item_id = item.get("id")
+    call_id = item.get("call_id")
     for position, (existing_index, existing_item) in enumerate(state.output_items):
         same_index = output_index is not None and existing_index == output_index
-        same_identity = identity and identity == (existing_item.get("id") or existing_item.get("call_id"))
-        if same_index or same_identity:
+        same_id = isinstance(item_id, str) and bool(item_id) and item_id == existing_item.get("id")
+        same_call = (
+            isinstance(call_id, str) and bool(call_id) and call_id == existing_item.get("call_id")
+            and item.get("type") == existing_item.get("type")
+        )
+        same_anonymous = output_index is None and existing_index is None and item == existing_item
+        if same_index or same_id or same_call or same_anonymous:
             state.output_items[position] = (output_index if output_index is not None else existing_index, copy.deepcopy(item))
             return
     state.output_items.append((output_index, copy.deepcopy(item)))
 
 
 def _upstream_output(state: CollectorState) -> list[dict[str, Any]] | None:
-    """Prefer the terminal snapshot; otherwise replay complete items in output order."""
+    """Recover elided terminal output from complete items in output order."""
+    terminal_output = None
     if isinstance(state.final_response_obj, dict):
         output = state.final_response_obj.get("output")
         if isinstance(output, list):
-            return output
+            if output:
+                return output
+            terminal_output = output
     if not state.output_items:
-        return None
+        return terminal_output
     return [
         item
         for _, item in sorted(state.output_items, key=lambda entry: (entry[0] is None, entry[0] or 0))
