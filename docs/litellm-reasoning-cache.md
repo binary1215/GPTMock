@@ -2,7 +2,7 @@
 
 GPTMock keeps the ChatGPT Responses backend behind OpenAI and Ollama adapters. For coding clients through a separate LiteLLM gateway, native Responses is the preferred path because its ordered output items can be replayed without flattening them into one assistant message. The Chat and Ollama extensions below preserve opaque reasoning for clients that retain extra fields. They cannot repair state already discarded by a client or gateway.
 
-This implementation is verified with offline mocked upstream responses. It does not establish real cache-hit rates, provider acceptance of every replay, cost savings, or coding-quality improvement. No gateway configuration or deployed container was changed by these patches.
+This implementation has offline regression coverage and a bounded live deployment check described below. The live check demonstrates selected replay paths and observed cache counters, not universal provider acceptance, guaranteed cache-hit rates, billing savings, or coding-quality improvement.
 
 ## Protocol choices
 
@@ -17,7 +17,7 @@ Readable summaries and opaque reasoning are separate. Neither `<think>` text nor
 
 ## LiteLLM configuration
 
-The following is a starting configuration based on source inspection of LiteLLM 1.103.1, not a deployment verified by this patch. Select a concrete model available to your account. `GPTMOCK_API_BASE` must be reachable from the **LiteLLM container** and end in `/v1`, for example `http://gptmock:8000/v1` on a shared Docker network. Separate hosts require a reachable host address and published GPTMock port. `localhost` inside LiteLLM refers to LiteLLM itself.
+The following configuration follows source inspection of LiteLLM 1.103.1. The same provider/base-URL pattern was subsequently tested with `gpt-5.6-luna` as described below. Select a concrete model available to your account. `GPTMOCK_API_BASE` must be reachable from the **LiteLLM container** and end in `/v1`, for example `http://gptmock:8000/v1` on a shared Docker network. Separate hosts require a reachable host address and published GPTMock port. `localhost` inside LiteLLM refers to LiteLLM itself.
 
 ```yaml
 model_list:
@@ -55,6 +55,8 @@ history += [{"role": "user", "content": "Explain the next step."}]
 If tools were requested, append their results before a user continuation. GPTMock's non-streaming internal `view_image` loop follows the same order, retaining all output items before appending tool results. A nonempty terminal `response.output` is authoritative. The Codex backend can instead emit complete `response.output_item.done` events followed by a terminal `output: []`; GPTMock recovers those completed items in output-index order, replacing duplicate updates. An empty terminal without completed items stays empty: partial deltas are not opaque replay state. Native streaming also fills this elided terminal output from completed items while preserving other events and terminal metadata. Streaming remains caller-owned and does not execute the internal tool loop.
 
 GPTMock does not add a persistent response store, `GET /responses/{id}`, or automatic `previous_response_id` emulation. Explicit full-history replay is the tested contract. Native usage after an internal `view_image` loop still describes the **final upstream request**, not the aggregate cost of every internal request.
+
+Terminal authority applies to collected output snapshots, not retroactive cancellation of already emitted Chat deltas. If an upstream stream contradicts a previously completed tool call with a later nonempty snapshot, the current Chat stream cannot retract that call and may still end with `finish_reason: tool_calls`. Contradictory-stream reconciliation remains a separate limitation.
 
 ## Chat and Ollama replay
 
@@ -109,6 +111,23 @@ uv build
 The focused mocked suites are `test_reasoning_replay.py`, `test_responses_continuity.py`, `test_cache_usage_fidelity.py`, and `test_ollama_fidelity.py`. They cover multiple reasoning items, opaque-only items, duplicate done events, terminal-only output, tool continuation, malformed replay, opt-out behavior, cache-key precedence, HTTP session propagation, detailed usage, and streaming/non-streaming adapters. `test_sdk_replay_contracts.py` additionally verifies two-turn Chat and Responses tool/reasoning replay through the installed OpenAI SDK. The offline test guard blocks real HTTPX transports and external socket connections, so a lost mock fails locally. Live tests stay disabled unless explicitly enabled with isolated test credentials.
 
 Before replacing a running service, build this branch's source rather than assuming a published image contains the patch. Verify through the actual LiteLLM gateway that a tool-result second turn retains opaque state, detailed usage reaches the client, and native Responses never falls back to Chat. Measure provider-reported cache counters over repeated stable-prefix requests separately from replay correctness. Failover to a different account/deployment requires an explicit affinity policy; do not silently strip reasoning and call that a successful continuity test.
+
+### Bounded live validation: 2026-10-05 (KST)
+
+Runtime revision `7ddc3b392cd7cb087e996cf9189f391895755825` was built into an isolated Docker container and connected to a separate LiteLLM 1.103.1 gateway via the `openai/` provider. Only a new test alias was added; all 22 existing gateway model configurations, the production GPTMock container/image/start time, and its auth file were unchanged. Credentials and private deployment details are intentionally omitted here.
+
+| Path tested with `gpt-5.6-luna` | Observed result |
+| --- | --- |
+| Direct Chat, nonstream and SSE | Encrypted reasoning item returned; full assistant message plus tool result replay accepted; second-turn answer `42` |
+| Direct Responses nonstream | Ordered reasoning/function-call output replay accepted; second-turn answer `42` |
+| Gateway native Responses, nonstream and SSE | Encrypted item present; streaming terminal contained both completed items; tool-result continuation returned `42`; detailed usage present |
+| Gateway Chat, nonstream and raw SSE | `reasoning_items` extension reached the client; echoed assistant state plus tool result accepted; second-turn answer `42`; detailed usage present |
+| Direct Ollama streaming | Expected text, final done flag, standard token counters, and detailed usage present; this smoke did not exercise opaque Ollama replay |
+| Gateway repeated stable-prefix Responses | Both requests reported 8,863 input tokens; cached tokens increased from 4,864 to 7,936; both returned the expected marker |
+
+The reasoning/tool probe used a small constraint-solving task and auto tool selection. A simpler forced tool call returned zero reasoning tokens and no encrypted item, so it was not counted as replay evidence. The live tests returned one encrypted reasoning item per first turn; multiple-item order/deduplication and malformed inputs are covered by offline tests, not this live sample. Final offline validation was **761 passed, 114 skipped**, plus Ruff. The raw Chat gateway path is not the separate LiteLLM Responses-to-Chat converter or a third-party client's stream aggregation. No coding-client end-to-end, failover, long-context, or billing comparison was performed.
+
+The isolated test used a private access-token snapshot without a refresh token to avoid competing refreshes against production. It therefore has a finite lifetime and needs its own authentication lifecycle before long-term operation. Replay and cached-token observations do not remove that operational limitation.
 
 ## Related projects reviewed
 
