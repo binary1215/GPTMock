@@ -24,6 +24,8 @@ GPTMock adapts client requests to the backend's supported format while preservin
 
 > **Migration note:** `--reasoning-compat` now defaults to `standard`, which emits reasoning via `delta.reasoning_content` / `message.reasoning_content` instead of injecting `<think>` tags into `content`. Set `--reasoning-compat think-tags` (or `GPTMOCK_REASONING_COMPAT=think-tags`) to keep the old behavior.
 
+For coding clients behind a separate LiteLLM gateway, prefer the native `/v1/responses` route. Chat and Ollama clients can opt into opaque `reasoning_items` replay with `GPTMOCK_REASONING_REPLAY=true`; readable `reasoning_content` alone is not equivalent to that state. Cache keys and upstream cached/reasoning token details are preserved, but cache hits depend on the upstream and the complete client/gateway path. See [LiteLLM reasoning and cache compatibility](docs/litellm-reasoning-cache.md) for configuration, replay examples, tested contracts, and remaining limitations.
+
 ## Requirements
 
 - **Docker Engine 24+ with Docker Compose v2** (recommended deployment)
@@ -497,6 +499,8 @@ Docker probes on 2026-09-03 verified authenticated raw HTTP requests for tags, s
 - **Image Generation** — Responses API `image_generation` tool support with base64 PNG output
 - **Local Image Inspection** — Codex-compatible `view_image` function tool for allowed local image paths
 - **Thinking Summaries** — `standard` mode returns `reasoning_content` by default; optional `think-tags`, `o3`, and `legacy` modes support other clients
+- **Reasoning Replay** — native Responses output preservation and opt-in `reasoning_items` for replay-aware Chat/Ollama clients, independent from display summaries
+- **Cache Observability** — explicit `prompt_cache_key` precedence and preserved upstream cached/reasoning token details in JSON and streaming usage
 - **Responses API** — `POST /v1/responses` for LangChain and other clients that auto-route codex models
 - **Ollama Compatibility** — chat and generate APIs with remote-model metadata, without fabricated GGUF sizes, digests, or local evaluation timings
 - **Auto Token Refresh** — JWT tokens are refreshed automatically before expiry
@@ -521,6 +525,7 @@ Each option can also be set via environment variable. Precedence: **CLI flag > `
 | `--reasoning-effort` | `GPTMOCK_REASONING_EFFORT` | `medium` | `none` / `minimal` / `low` / `medium` / `high` / `xhigh` / `max`; availability is model-specific |
 | `--reasoning-summary` | `GPTMOCK_REASONING_SUMMARY` | `auto` | `auto` / `concise` / `detailed` / `none` |
 | `--reasoning-compat` | `GPTMOCK_REASONING_COMPAT` | `standard` | How reasoning is exposed: `standard` / `think-tags` / `o3` / `legacy` (`openai` is accepted as an alias for `standard`, `current` as an alias for `legacy`) |
+| `--reasoning-replay` | `GPTMOCK_REASONING_REPLAY` | off | Emit opaque `reasoning_items` for replay-aware Chat/Ollama clients; request boolean overrides this default. Does not change native Responses output |
 | `--expose-reasoning-models` | `GPTMOCK_EXPOSE_REASONING_MODELS` | off | Show effort variants as separate models in `/v1/models` |
 | `--enable-web-search` | `GPTMOCK_DEFAULT_WEB_SEARCH` | off | Enable web search by default when `responses_tools` is omitted |
 | `--output-token-policy` | `GPTMOCK_OUTPUT_TOKEN_POLICY` | `omit` | `omit` unenforceable output limits with warning/header, or `reject` them with HTTP 400 |
