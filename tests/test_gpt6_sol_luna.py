@@ -18,8 +18,18 @@ from gptmock.services.reasoning import (
     extract_reasoning_from_model_name,
 )
 
-MODELS: Final = ("gpt-6-sol", "gpt-6-luna")
 EFFORTS: Final = ("none", "low", "medium", "high", "xhigh", "max")
+MODEL_EFFORTS: Final = {
+    "gpt-6-sol": EFFORTS,
+    "gpt-6-luna": EFFORTS,
+    "gpt-6.1-sol": EFFORTS[1:],
+}
+MODELS: Final = tuple(MODEL_EFFORTS)
+SUPPORTED: Final = [(model, effort) for model, efforts in MODEL_EFFORTS.items() for effort in efforts]
+UNSUPPORTED: Final = [
+    (model, effort) for model in MODELS for effort in ("none", "minimal", "ultra")
+    if effort not in MODEL_EFFORTS[model]
+]
 ROUTES: Final = ("/v1/chat/completions", "/v1/completions", "/v1/responses", "/api/chat", "/api/generate")
 
 
@@ -30,7 +40,7 @@ def test_gpt6_discovery_advertises_concrete_models(model: str, expose_reasoning:
         models = {item["id"]: item for item in client.get("/v1/models").json()["data"]}
         tags = {item["name"]: item for item in client.get("/api/tags").json()["models"]}
         assert models[model]["reasoning"] == {
-            "supported_efforts": list(EFFORTS), "default_effort": "medium",
+            "supported_efforts": list(MODEL_EFFORTS[model]), "default_effort": "medium",
         }
         assert tags[model]["remote_model"] == model
         assert tags[model]["details"]["format"] == "remote"
@@ -42,7 +52,7 @@ def test_gpt6_discovery_advertises_concrete_models(model: str, expose_reasoning:
             response = client.post("/api/show", json={"model": model + suffix})
             assert response.status_code == 200
             assert response.json()["model_info"]["gptmock.upstream_model"] == model
-        for effort in EFFORTS:
+        for effort in MODEL_EFFORTS[model]:
             name = f"{model}-{effort}"
             assert (name in models) is expose_reasoning
             if expose_reasoning:
@@ -50,8 +60,7 @@ def test_gpt6_discovery_advertises_concrete_models(model: str, expose_reasoning:
                 assert tags[name]["remote_model"] == model
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("effort", EFFORTS)
+@pytest.mark.parametrize(("model", "effort"), SUPPORTED)
 def test_gpt6_show_effort_variant_reports_concrete_upstream(model: str, effort: str) -> None:
     with TestClient(create_app(Settings(expose_reasoning_models=True))) as client:
         response = client.post("/api/show", json={"model": f"{model}-{effort}"})
@@ -65,8 +74,7 @@ def test_gpt6_show_hides_effort_variants_by_default(model: str) -> None:
         assert client.post("/api/show", json={"model": f"{model}-max"}).status_code == 404
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("effort", EFFORTS)
+@pytest.mark.parametrize(("model", "effort"), SUPPORTED)
 @pytest.mark.parametrize("fast", [False, True])
 def test_gpt6_aliases_preserve_model_and_reasoning(model: str, effort: str, fast: bool) -> None:
     requested = model + ("-fast" if fast else "")
@@ -76,29 +84,27 @@ def test_gpt6_aliases_preserve_model_and_reasoning(model: str, effort: str, fast
         alias = f"{requested}{separator}{effort}"
         assert normalize_model_name(alias) == requested
         assert extract_reasoning_from_model_name(alias) == {"effort": effort}
-        assert allowed_efforts_for_model(alias) == set(EFFORTS)
+        assert allowed_efforts_for_model(alias) == set(MODEL_EFFORTS[model])
     overrides = {"service_tier": "priority"} if fast else {}
     assert resolve_upstream_model(requested) == (model, overrides)
     assert build_reasoning_param(effort, allowed_efforts=allowed_efforts_for_model(requested))["effort"] == effort
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("effort", ["minimal", "ultra"])
+@pytest.mark.parametrize(("model", "effort"), UNSUPPORTED)
 def test_gpt6_unsupported_efforts_are_rejected(model: str, effort: str) -> None:
     assert f"{model}-{effort}" not in get_model_list(expose_reasoning=True)
     with pytest.raises(ValueError, match="Unsupported reasoning effort"):
         build_reasoning_param(effort, allowed_efforts=allowed_efforts_for_model(model))
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("effort", (*EFFORTS, "minimal", "ultra"))
+@pytest.mark.parametrize(("model", "effort"), SUPPORTED + UNSUPPORTED)
 def test_gpt6_routes_preserve_model_and_validate_effort(
     monkeypatch: pytest.MonkeyPatch, model: str, effort: str,
 ) -> None:
     captured = []
 
     async def fake_auth() -> tuple[str, str]:
-        assert effort in EFFORTS, "Unsupported efforts must fail before authentication"
+        assert effort in MODEL_EFFORTS[model], "Unsupported efforts must fail before authentication"
         return "test-token", "test-account"
 
     def fake_transport(request: httpx.Request) -> httpx.Response:
@@ -129,7 +135,7 @@ def test_gpt6_routes_preserve_model_and_validate_effort(
                     "reasoning": {"effort": effort},
                 }
                 response = client.post(route, json=payload)
-                if effort not in EFFORTS:
+                if effort not in MODEL_EFFORTS[model]:
                     assert response.status_code == 400
                     assert "Unsupported reasoning effort" in response.text
                     assert captured == []
@@ -140,4 +146,4 @@ def test_gpt6_routes_preserve_model_and_validate_effort(
                 assert captured[-1]["model"] == model
                 assert captured[-1]["reasoning"]["effort"] == effort
                 assert (captured[-1].get("service_tier") == "priority") is bool(suffix)
-    assert len(captured) == (len(ROUTES) * 2 if effort in EFFORTS else 0)
+    assert len(captured) == (len(ROUTES) * 2 if effort in MODEL_EFFORTS[model] else 0)
