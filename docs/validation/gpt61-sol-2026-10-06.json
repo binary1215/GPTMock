@@ -1,0 +1,59 @@
+{
+  "date": "2026-10-06",
+  "model": "gpt-6.1-sol",
+  "runtime_commit": "253b69b7e2af319eb784b7a7417f4d73dca4fd6e",
+  "image": "gptmock:patched-253b69b-20261006",
+  "image_digest": "sha256:1946ad11ec5cb4095e94d66b19c9b3bd44cf63c84fd32277f8a8308772fa1d70",
+  "official_source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+  "offline": {
+    "pytest_command": "python -m pytest tests/ --no-testmon -q",
+    "passed": 808,
+    "skipped": 126,
+    "ruff": "passed",
+    "covered": ["discovery", "five compatibility routes", "effort validation before auth", "aliases", "streaming system-message adaptation"]
+  },
+  "configured_efforts": ["low", "medium", "high", "xhigh", "max"],
+  "default_effort": "medium",
+  "candidate_live": {
+    "chat_text": "passed",
+    "responses_streaming_tool_replay": {"passed": true, "encrypted_items_replayed": 1, "answer": "42"},
+    "chat_streaming_tool_replay": {"passed": true, "encrypted_items_replayed": 1, "answer": "42"},
+    "repeated_synthetic_prompt": {"input_tokens": 8863, "first_cached_tokens": 0, "second_cached_tokens": 8704}
+  },
+  "production_live": {
+    "health": "healthy",
+    "chat_text": {"http_status": 200, "actual_model": "gpt-6.1-sol", "marker_ok": true},
+    "responses_streaming_tool_replay": {"passed": true, "encrypted_items_replayed": 1, "answer": "42", "replay_cached_tokens": 5120},
+    "system_message": {"http_status": 200, "marker_ok": true},
+    "unsupported_efforts": {"none": 400, "minimal": 400},
+    "preserved": ["OAuth credential bytes", "ports", "mounts", "environment values", "networks", "existing test container"]
+  },
+  "litellm_gateway": {
+    "registered": true,
+    "provider": "openai",
+    "default_effort": "medium",
+    "priority_override": false,
+    "public_models_target_count": 1,
+    "models_before": 23,
+    "models_after": 24,
+    "existing_models_and_credential_unchanged": true,
+    "restarted": false,
+    "responses_sse_http_statuses": [200, 200, 200, 200],
+    "medium_tool_replay": {"answer": "42", "input_tokens": 5167, "cached_tokens": 4992},
+    "high_reasoning_seed": {"encrypted_items": 1, "input_tokens": 5190, "output_tokens": 251, "reasoning_tokens": 203},
+    "high_full_output_replay": {"encrypted_reasoning_replayed": true, "answer": "42", "input_tokens": 5454, "cached_tokens": 0},
+    "evidence_owner": "Existing LiteLLM management task; independently tested the gateway, not the direct backend."
+  },
+  "rollout": {
+    "first_attempt": "Automatically rolled back after an environment-list order comparison; values were unchanged.",
+    "second_attempt": "Applied successfully after comparing environment names and values, with all preservation checks passing.",
+    "cleanup": "Removed only the disposable candidate container and its access-only authentication snapshot; retained previous image and rollback configuration."
+  },
+  "limitations": [
+    "Live checks exercised low/medium directly and medium/high through LiteLLM; xhigh/max and priority availability were not verified.",
+    "Gateway Chat was not exercised; candidate Chat compatibility was verified directly.",
+    "Cache usage observation does not establish subscription billing savings or quality equivalence.",
+    "Backend availability is account-specific; public API documentation does not guarantee ChatGPT OAuth access.",
+    "Chat reasoning replay requires a client that preserves the nonstandard reasoning_items field."
+  ]
+}
