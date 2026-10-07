@@ -13,18 +13,33 @@
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-green.svg"></a>
 </p>
 
-> **This is a fork of [RayBytes/chatmock](https://github.com/RayBytes/chatmock).**
-> The original Flask + synchronous `requests` stack has been replaced with **FastAPI + async `httpx`**, a layered architecture (router / service / infra), `pydantic-settings` configuration, and `uv` as the build system.
+> **This repository is [binary1215/GPTMock](https://github.com/binary1215/GPTMock), based on [rapidrabbit76/GPTMock](https://github.com/rapidrabbit76/GPTMock) and originally [RayBytes/chatmock](https://github.com/RayBytes/chatmock).**
+> It retains the FastAPI + async `httpx` architecture and adds reasoning replay, cache/session fidelity, and documented LiteLLM/client validation on `feat/litellm-reasoning-fidelity`.
 
-Integration and coverage badges are updated from local runs. Refresh both by running `scripts/test.sh` with `GIST_TOKEN` available in your environment or `.env`.
+The test and coverage badges above belong to the upstream repository; they do not report this fork's branch checks. Fork validation is recorded in the linked reports below. The upstream badge-refresh script requires a configured `GIST_TOKEN`; it is not needed to run local tests.
 
 GPTMock runs a local protocol adapter in front of the ChatGPT Codex backend. OpenAI SDKs, OpenAI-compatible frontends and gateways, and Ollama-compatible clients can use the same authenticated backend without GPTMock pretending that remote models are local weights. Its model catalog is a configured snapshot, not a live availability check. Backend access can change before that catalog is updated; see [Supported Models](#supported-models) for dated results and known stale entries.
 
-GPTMock adapts client requests to the backend's supported format while preserving model identity, instruction text, strict function schemas, tool choice, reasoning controls, and service-tier requests. For GPT-5.3 Codex Spark, GPT-5.5, GPT-5.6 Luna/Terra/Sol, and GPT-6 Astra, system-message text is carried in the Responses `instructions` field so existing chat clients can keep their system prompts. The actual response model, service tier, terminal status, and remaining upstream errors are returned to the client.
+GPTMock adapts client requests to the backend's supported format while preserving model identity, instruction text, strict function schemas, tool choice, reasoning controls, and service-tier requests. For GPT-5.3 Codex Spark, GPT-5.5, GPT-5.6 Luna/Terra/Sol, GPT-6 Astra/Sol/Luna, and GPT-6.1 Sol, system-message text is carried in the Responses `instructions` field so existing chat clients can keep their system prompts. The actual response model, service tier, terminal status, and remaining upstream errors are returned to the client.
 
 > **Migration note:** `--reasoning-compat` now defaults to `standard`, which emits reasoning via `delta.reasoning_content` / `message.reasoning_content` instead of injecting `<think>` tags into `content`. Set `--reasoning-compat think-tags` (or `GPTMOCK_REASONING_COMPAT=think-tags`) to keep the old behavior.
 
 For coding clients behind a separate LiteLLM gateway, prefer the native `/v1/responses` route. Chat and Ollama clients can opt into opaque `reasoning_items` replay with `GPTMOCK_REASONING_REPLAY=true`; readable `reasoning_content` alone is not equivalent to that state. Cache keys and upstream cached/reasoning token details are preserved, but cache hits depend on the upstream and the complete client/gateway path. See [LiteLLM reasoning and cache compatibility](docs/litellm-reasoning-cache.md) for configuration, replay examples, tested contracts, and remaining limitations.
+
+### Fork changes and verification
+
+- **Responses continuity:** retain ordered output items, encrypted reasoning, and tool calls; recover completed items when the backend elides the terminal output array.
+- **Chat/Ollama replay:** opt-in opaque `reasoning_items`, separate from readable thinking summaries. Clients must preserve and return the extension.
+- **Cache and session fidelity:** explicit cache keys take precedence; session identifiers and detailed cached/reasoning-token usage survive supported adapters. This is not a persistent conversation store.
+- **GPT-6.1 Sol:** exact-model routing, discovery, aliases, system-message adaptation, and model-specific effort validation. The default remains `medium`.
+
+| Validation | Recorded scope | Evidence |
+| --- | --- | --- |
+| Offline regression, 2026-10-06 | 808 passed, 126 skipped; Ruff passed; real network access blocked by default | [Model/replay validation](docs/validation/gpt61-sol-2026-10-06.json) |
+| OpenCode through LiteLLM, 2026-10-05 | `gpt-5.6-luna`, CLI 1.18.34 and 1.3.13; file read/edit/test, session resume, encrypted replay and cache counters | [Client validation](docs/validation/opencode-2026-10-05.json) |
+| GPT-6.1 Sol, 2026-10-06 | Direct text/system/tool checks; gateway Responses SSE and encrypted tool-result continuation; cache hits observed | [Deployment/gateway validation](docs/validation/gpt61-sol-2026-10-06.json) |
+
+These are dated, bounded checks, not certification of every client/model combination. In particular, the OpenCode run used GPT-5.6 Luna, not GPT-6.1 Sol. Cache hits and reasoning replay are independent observations; neither proves billing savings or a quality improvement.
 
 ## Requirements
 
@@ -43,7 +58,7 @@ The commands below explicitly select `docker-compose.local.yml`, a separate conf
 ### 1. Clone and build
 
 ```bash
-git clone https://github.com/rapidrabbit76/GPTMock.git
+git clone --branch feat/litellm-reasoning-fidelity https://github.com/binary1215/GPTMock.git
 cd GPTMock
 docker compose -f docker-compose.local.yml build
 ```
@@ -123,7 +138,7 @@ Clients must then send `Authorization: Bearer <GPTMOCK_API_KEY>` to `/v1/*` and 
 
 ## Direct Install (uvx)
 
-This is the non-Docker development path. No clone or persistent installation is needed.
+This is the non-Docker development path. No clone or persistent installation is needed. The short `uvx gptmock` commands below install the published PyPI package, not this fork's working branch; use the source-qualified commands at the end of this section for the changes described here.
 
 ### 1. Login
 
@@ -157,11 +172,12 @@ gptmock serve --port 9000
 gptmock info
 ```
 
-> **Note:** To install directly from the GitHub repository instead of PyPI:
+> **This fork's branch:** To run these changes directly from source instead of PyPI:
 > ```bash
-> uvx --from "git+https://github.com/rapidrabbit76/GPTMock" gptmock login
-> uvx --from "git+https://github.com/rapidrabbit76/GPTMock" gptmock serve
+> uvx --from "git+https://github.com/binary1215/GPTMock@feat/litellm-reasoning-fidelity" gptmock login
+> uvx --from "git+https://github.com/binary1215/GPTMock@feat/litellm-reasoning-fidelity" gptmock serve
 > ```
+> Pin a reviewed commit instead of the branch name when you need reproducible deployment.
 
 ---
 
@@ -182,7 +198,21 @@ sudo chmod 600 ./volumes/gptmock/auth.json  # if credentials already exist
 
 Apply ownership changes only to that credential directory, not the repository or a broader parent directory. Do not use world-writable permissions. Docker Desktop bind-mount permission behavior can differ; the separate local Compose named volume is the recommended fresh-install path. Login and serve check storage access before starting and report migration guidance if it is inaccessible. Concurrent credential refreshes sharing one auth home are serialized using a local filesystem lock; avoid simultaneous manual re-login and refresh or network filesystems without reliable locking.
 
+### Separate LiteLLM gateway
+
+Keep authentication boundaries separate: GPTMock stores the ChatGPT OAuth credentials in its private volume, LiteLLM uses the optional GPTMock proxy API key, and coding clients use their LiteLLM gateway key. Never put OAuth access/refresh tokens in a client configuration or commit them to this repository.
+
+1. Build this branch's source and authenticate GPTMock once using the persistent volume.
+2. Configure LiteLLM's OpenAI provider with a GPTMock base URL reachable **from the LiteLLM container**, ending in `/v1` (for example `http://gptmock:8000/v1` on a shared network). On separate hosts, use the reachable host address and published port; container `localhost` is not the other host.
+3. Register an available concrete model, such as `gpt-6.1-sol`, and direct the client to the LiteLLM base URL. Registering an alias does not itself choose the wire protocol: send native `/v1/responses` requests and avoid a Responses-to-Chat fallback when replay fidelity matters.
+4. Build the next `input` from accumulated prior input, the full ordered response `output`, and then matching tool results. Use `store: false`; GPTMock does not provide stored-response retrieval or resolve `previous_response_id` from a local conversation database.
+5. Reuse a stable per-session `prompt_cache_key` or `session_id` and inspect provider-reported usage. The fallback fingerprint-to-session mapping is process-local, not durable conversation history.
+
+For GPT-6.1 Sol, select `low`, `medium` (default), `high`, `xhigh`, or `max`; do not configure `none` or `minimal`. The [configuration and replay guide](docs/litellm-reasoning-cache.md#litellm-configuration) includes the gateway configuration and two-turn examples. Enable `GPTMOCK_REASONING_REPLAY=true` only when you need replay-aware Chat/Ollama output; native Responses already preserves reasoning items without that switch.
+
 ### OpenCode
+
+For the verified **OpenCode → LiteLLM → GPTMock** path, start with the [secret-free Responses configuration](docs/examples/opencode-responses.json) and its [version-specific instructions](docs/litellm-reasoning-cache.md#configuration-for-both-tested-opencode-versions). Supply `LITELLM_BASE_URL` and `LITELLM_API_KEY` through the environment, and align the example's model alias with the one registered in your gateway. Its context/output limits are test settings, not verified provider limits. The direct-to-GPTMock example below is a separate configuration.
 
 Use OpenCode's Responses provider as the recommended configuration. OpenCode 1.x configuration:
 
@@ -219,7 +249,7 @@ Use OpenCode's Responses provider as the recommended configuration. OpenCode 1.x
 
 Select `gptmock/gpt-5.6-luna` and the desired variant. OpenCode automatically sends `max_output_tokens`; GPTMock's default `omit` policy keeps the request compatible while explicitly reporting that the limit was not enforced.
 
-For `gpt-5.3-codex-spark`, `gpt-5.5`, the GPT-6 Astra/Sol/Luna models, and the GPT-5.6 Luna/Terra/Sol models, GPTMock's Chat endpoint moves text system messages into upstream `instructions`. OpenCode 1.17.18 completed a real Astra file-read tool call and its follow-up through both adapters. The other listed models use the same system-message adaptation; that does not establish full client/tool compatibility for every model. SDK versions may encode Responses prompts as developer input or as `instructions`.
+For `gpt-5.3-codex-spark`, `gpt-5.5`, the GPT-6 Astra/Sol/Luna models, GPT-6.1 Sol, and the GPT-5.6 Luna/Terra/Sol models, GPTMock's Chat endpoint moves text system messages into upstream `instructions`. OpenCode 1.17.18 completed a real Astra file-read tool call and its follow-up through both adapters. The other listed models use the same system-message adaptation; that does not establish full client/tool compatibility for every model. SDK versions may encode Responses prompts as developer input or as `instructions`.
 
 To request maximum Astra reasoning, select `gpt-6-astra` with `--variant max` (provider option `reasoningEffort: "max"`). `gpt-6-astra-max` is not a model: that removed alias returns HTTP 400 with migration guidance instead of silently selecting another effort. `max` remains supported through the reasoning parameter.
 
@@ -400,7 +430,9 @@ Supported image content types are PNG, JPEG, GIF, and WebP. `detail: "original"`
 
 ## Supported Models
 
-The following snapshot combines the current registry with direct backend checks on **2026-09-13 (KST)**. The availability check used `low` effort, non-streaming, user-only Chat Completions and Responses requests. Successful responses contained the requested test text and the expected concrete model name. It did not rerun every reasoning level, tools, images, or client integration. The effort column describes GPTMock's configured validation range, not fresh verification of every level.
+The current catalog advertises ten base IDs: the seven entries in the September snapshot below, plus `gpt-6-sol`, `gpt-6-luna`, and `gpt-6.1-sol`. `gpt-5.6` is an alias of `gpt-5.6-sol`, not an additional backend model. Fast aliases are request-only and reasoning variants are hidden unless explicitly enabled. Discovery is configuration, not proof of account entitlement.
+
+The following older snapshot records direct backend checks on **2026-09-13 (KST)**; newer model checks follow it. That availability check used `low` effort, non-streaming, user-only Chat Completions and Responses requests. Successful responses contained the requested test text and the expected concrete model name. It did not rerun every reasoning level, tools, images, or client integration. The effort column describes GPTMock's configured validation range, not fresh verification of every level.
 
 | Model | Configured Reasoning Efforts | Observed Backend Status (2026-09-13) |
 |-------|-------------------|--------|
@@ -420,7 +452,7 @@ Sol and Luna use the existing Responses-backed adapters for OpenAI Chat/Completi
 
 Prefer native Responses clients for opaque reasoning/tool replay. The official OpenAI Chat Completions endpoint has a text-only restriction for this model, but GPTMock's Chat/Ollama compatibility endpoints use its Responses-backed adapter, not that official Chat endpoint. Offline tests cover all five compatibility routes, discovery, effort validation, aliases, and streaming/system-message adaptation; backend/account availability and live capability checks must be verified separately.
 
-**Live check (2026-10-06):** The deployed GPTMock build completed `gpt-6.1-sol` Chat text, Responses streaming tool calls with encrypted reasoning replay, and system-message requests. The same candidate build also completed Chat streaming tool/opaque replay. A repeated synthetic Responses prompt reported 8,704 cached tokens out of 8,863 input tokens. `none`/`minimal` returned HTTP 400 as intended. These checks used `low`/`medium`; higher efforts, priority availability, other accounts, and billing effects were not established by this run. See the [sanitized validation record](docs/validation/gpt61-sol-2026-10-06.json).
+**Live check (2026-10-06):** The deployed GPTMock build completed `gpt-6.1-sol` Chat text, Responses streaming tool calls with encrypted reasoning replay, and system-message requests. The same candidate build also completed Chat streaming tool/opaque replay. A repeated synthetic Responses prompt reported 8,704 cached tokens out of 8,863 input tokens. `none`/`minimal` returned HTTP 400 as intended. Direct checks used `low`/`medium`; gateway checks below additionally exercised `high`. Neither path established `xhigh`/`max`, priority availability, other-account access, or billing effects. See the [sanitized validation record](docs/validation/gpt61-sol-2026-10-06.json).
 
 The existing LiteLLM gateway also registered `gpt-6.1-sol` using its unchanged GPTMock credential, with default effort `medium` and no priority override. Four gateway Responses SSE calls completed successfully: a `medium` tool round trip and a `high` encrypted-reasoning/tool round trip. Full-output replay returned the expected answer; the medium replay reported 4,992 cached input tokens. Existing model records were preserved and LiteLLM did not need a restart. This adds live `high` coverage; `xhigh`/`max`, priority, and gateway Chat were not exercised.
 
@@ -436,7 +468,7 @@ Fast aliases inherit their base model's availability. On 2026-09-13, `gpt-5.4-fa
 
 > **GPT-6 Astra:** `gpt-6-astra` connects directly to that exact upstream model. The [official model documentation](https://developers.openai.com/api/docs/models/gpt-6-astra) lists `low`, `medium`, `high`, `xhigh`, and `max`; direct ChatGPT Codex probes on 2026-09-05 completed at all five efforts and echoed the requested model and effort. That backend rejected `none`, `minimal`, `ultra`, `gpt-6-astra-pro`, and `reasoning.mode="pro"`. Those options are not advertised as supported. OpenAI Chat Completions and Ollama clients use GPTMock's existing Responses-backed adapter, including tool calls. See [Astra validation](docs/astra-validation.md) for the tested interfaces and limitations.
 
-> **System-message compatibility:** for GPT-5.3 Codex Spark, GPT-5.5, GPT-5.6 Luna/Terra/Sol, and GPT-6 Astra/Sol/Luna, GPTMock carries text system messages into `instructions`, after any existing instructions and in message order. Developer/user messages and tool results remain in `input`. This applies to OpenAI Chat, Responses, Ollama chat, and Ollama generate's `system` field, including existing fast aliases and streaming. Sol/Luna use this as a compatibility policy; their backend requirement for it has not been verified. Existing clients can keep their system prompts. Other models and unsupported non-text system content are passed through unchanged.
+> **System-message compatibility:** for GPT-5.3 Codex Spark, GPT-5.5, GPT-5.6 Luna/Terra/Sol, GPT-6 Astra/Sol/Luna, and GPT-6.1 Sol, GPTMock carries text system messages into `instructions`, after any existing instructions and in message order. Developer/user messages and tool results remain in `input`. This applies to OpenAI Chat, Responses, Ollama chat, and Ollama generate's `system` field, including existing fast aliases and streaming. GPT-6 Sol/Luna use this as a compatibility policy; their backend requirement for it has not been verified. Existing clients can keep their system prompts. Other models and unsupported non-text system content are passed through unchanged.
 
 > **Upstream availability note:** model availability can change independently of GPTMock releases. The older model list reflects direct probes made on 2026-08-26, GPT-5.6 was rechecked on 2026-09-03, and Astra was verified on 2026-09-05. `gpt-5`, `gpt-5.1`, `gpt-5.2`, `gpt-5-codex`, `gpt-5.1-codex`, `gpt-5.1-codex-mini`, `gpt-5.1-codex-max`, `gpt-5.2-codex`, and `gpt-5.3-codex` were rejected and are therefore not advertised.
 
@@ -450,7 +482,7 @@ Always supply a non-empty model name. Generation requests without `model` return
 
 | Input or event | GPTMock behavior |
 |----------------|------------------|
-| `system` and `developer` messages | For Spark, GPT-5.5, GPT-5.6 Luna/Terra/Sol, and Astra, system text is moved into `instructions` and developer messages remain in `input`; other models retain the supplied roles |
+| `system` and `developer` messages | For Spark, GPT-5.5, GPT-5.6 Luna/Terra/Sol, GPT-6 Astra/Sol/Luna, and GPT-6.1 Sol, system text is moved into `instructions` and developer messages remain in `input`; other models retain the supplied roles |
 | Function tools with `strict: true` | Strict schema flag and parameters are preserved |
 | `tool_choice: "required"` | Forwarded as required; never weakened to `auto` |
 | Rejected tools or model options | Upstream error is returned; GPTMock does not remove tools and retry |
@@ -585,9 +617,11 @@ When web search is active, the model may return `annotations` containing source 
 
 **Streaming** (`stream: true`) — annotations arrive as a dedicated chunk before the final `stop` chunk:
 
-```json
+```text
 data: {"choices": [{"delta": {"annotations": [{"type": "url_citation", "start_index": 0, "end_index": 150, "url": "https://...", "title": "..."}]}, "finish_reason": null}]}
+
 data: {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+
 ```
 
 **Responses API** (`POST /v1/responses`, non-streaming) — annotations are nested inside the output content:
@@ -639,6 +673,10 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ## Notes & Limits
 
 - Requires an active, paid ChatGPT account.
+- GPTMock is not a durable session/history store. Clients own conversation history, tool execution, and compaction; keep replayed opaque state within the same model/account boundary.
+- Native Responses is the preferred fidelity path. A client or gateway that strips `reasoning_items` cannot be repaired by enabling the extension only on GPTMock. OpenCode's tested Chat adapter completed tasks but did not replay opaque state.
+- Long-context compaction, account failover, universal client compatibility, and quality/billing improvements are not established by the bounded tests. A cache hit is not proof of reasoning replay, and replay does not guarantee a cache hit.
+- Verbose payload logging can contain prompts and opaque reasoning. Keep it off unless needed for controlled diagnostics, and never publish raw logs or authentication volumes.
 - Context length may be partially used by internal system instructions.
 - For the lowest-reasoning latency baseline, use the lowest effort supported by the selected model (`none` for GPT-5.6, otherwise usually `low`) and set `--reasoning-summary` to `none`.
 - Context limits and account entitlements are controlled by the ChatGPT Codex backend and may differ from the ChatGPT app or OpenAI API.
@@ -648,4 +686,5 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ## Credits
 
 - Original project: [RayBytes/chatmock](https://github.com/RayBytes/chatmock)
-- This fork: [rapidrabbit76/GPTMock](https://github.com/rapidrabbit76/GPTMock)
+- Upstream FastAPI implementation: [rapidrabbit76/GPTMock](https://github.com/rapidrabbit76/GPTMock)
+- This fork and integration work: [binary1215/GPTMock](https://github.com/binary1215/GPTMock)
