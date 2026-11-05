@@ -23,6 +23,7 @@ MODEL_EFFORTS: Final = {
     "gpt-6-sol": EFFORTS,
     "gpt-6-luna": EFFORTS,
     "gpt-6.1-sol": EFFORTS[1:],
+    "gpt-6.1-terra": EFFORTS,
 }
 MODELS: Final = tuple(MODEL_EFFORTS)
 SUPPORTED: Final = [(model, effort) for model, efforts in MODEL_EFFORTS.items() for effort in efforts]
