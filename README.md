@@ -329,6 +329,8 @@ The initial endpoint supports `n=1`, non-streaming `b64_json`, PNG output, `qual
 
 For LiteLLM, configure the deployment with `model: gptmock-image`, `custom_llm_provider: openai`, the existing GPTMock credential, and `model_info.mode: image_generation`. Clients call the gateway's `/v1/images/generations`; do not route this alias through Chat or Ollama text-generation endpoints. `/v1/models` advertises the image alias separately, while `/api/tags` continues to list only text models. No separate paid OpenAI API key is introduced.
 
+**LiteLLM compatibility:** With the tested LiteLLM 1.109.0 gateway, omit `response_format` as in the example above. Explicit `response_format="b64_json"` is rejected by LiteLLM's image parameter validation before reaching GPTMock; the default still returns base64 PNG. The live gateway test preserved the actual `size` (`1536x1024`) and native `usage`. Clients that always send `response_format` need a client or LiteLLM adjustment. No global parameter-dropping setting is required.
+
 ### Image Generation (Responses API)
 
 GPTMock can expose the ChatGPT Codex backend's built-in image generation tool through `POST /v1/responses`. This uses your existing GPTMock / Codex OAuth credentials; no separate OpenAI API key is required.
