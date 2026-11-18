@@ -39,6 +39,15 @@ class ResponsesCreateRequest(BaseModel):
     stream: bool = False
 
 
+class ImageGenerationRequest(BaseModel):
+    """POST /v1/images/generations; optional fields are validated before authentication."""
+
+    model_config = ConfigDict(extra="allow")
+
+    model: str
+    prompt: str
+
+
 class OllamaShowRequest(BaseModel):
     """POST /api/show request body."""
 

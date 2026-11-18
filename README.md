@@ -305,11 +305,35 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   }'
 ```
 
+### Image Generation (subscription default)
+
+Use `POST /v1/images/generations` with `model: "gptmock-image"` to generate one PNG through the existing ChatGPT OAuth credentials. This is a subscription-default alias, **not a selectable GPT Image 2.6 Sunburst/Flare model**. The native Codex Images backend accepted an unknown model name in the 2026-11-18 probe and did not report the actual model identity. GPTMock therefore advertises only the generic alias and makes no version-selection claim.
+
+```python
+import base64
+from pathlib import Path
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="YOUR_PROXY_KEY")
+result = client.images.generate(
+    model="gptmock-image",
+    prompt="A red circle centered on a white background",
+    quality="low",
+    size="1024x1024",
+)
+Path("generated.png").write_bytes(base64.b64decode(result.data[0].b64_json))
+print("Actual size:", result.model_dump().get("size"))
+```
+
+The initial endpoint supports `n=1`, non-streaming `b64_json`, PNG output, `quality` (`auto`, `low`, `medium`, `high`), `background` (`auto`, `opaque`), and `size` (`auto` or `WIDTHxHEIGHT`). Unsupported options are rejected before contacting the backend. `size` is a request, not a guarantee: the tested backend returned a 1536x1024 image for a 1024x1024 request. The response's `size` comes from the actual PNG dimensions; native usage and other response metadata are preserved. There is no hosted image URL, multipart editing, transparency, GIF/SVG, batch generation, or partial-image streaming support in this endpoint.
+
+For LiteLLM, configure the deployment with `model: gptmock-image`, `custom_llm_provider: openai`, the existing GPTMock credential, and `model_info.mode: image_generation`. Clients call the gateway's `/v1/images/generations`; do not route this alias through Chat or Ollama text-generation endpoints. `/v1/models` advertises the image alias separately, while `/api/tags` continues to list only text models. No separate paid OpenAI API key is introduced.
+
 ### Image Generation (Responses API)
 
 GPTMock can expose the ChatGPT Codex backend's built-in image generation tool through `POST /v1/responses`. This uses your existing GPTMock / Codex OAuth credentials; no separate OpenAI API key is required.
 
-The original examples used `gpt-5.4` and `gpt-5.4-mini`; both were rejected by the tested ChatGPT Codex backend on 2026-09-13. Image generation was not revalidated with a replacement model. The following illustrates the request format only: replace `<verified-image-generation-model>` with a model whose image-generation tool access you have verified for your account. A successful text response alone does not verify image generation.
+On 2026-11-18, `gpt-6.2-sol` produced valid PNG `image_generation_call` results with this account. Explicit Sunburst/Flare tool model requests were accepted, but the returned image items did not identify the actual image model, so model selection remains unverified. The following illustrates the request format: replace `<verified-image-generation-model>` with an account-verified orchestrator such as `gpt-6.2-sol`, not the `gptmock-image` endpoint alias. A successful text response alone does not verify image generation.
 
 Pass an `image_generation` tool in the Responses API request:
 
@@ -375,7 +399,7 @@ with open("cat.png", "wb") as fp:
     fp.write(base64.b64decode(image_b64))
 ```
 
-> **Notes:** Image-generation support is account- and backend-dependent. Earlier documentation reported successful GPT-5.4/mini image generation, but that is historical evidence, not current availability.
+> **Notes:** Image-generation support is account- and backend-dependent. The generic image endpoint above avoids claiming a selectable image model version. Responses image generation uses an additional text model, whose total usage must not be mistaken for image-only usage.
 
 ### Local Image Inspection (`view_image`)
 

@@ -33,7 +33,7 @@ def test_retired_models_are_absent_from_discovery(expose_reasoning: bool) -> Non
         assert models.status_code == tags.status_code == 200
         model_ids = {item["id"] for item in models.json()["data"]}
         tag_ids = {item["name"] for item in tags.json()["models"]}
-        assert model_ids == tag_ids
+        assert model_ids - {"gptmock-image"} == tag_ids
         assert "gpt-5.5" in model_ids
         assert not any(name.startswith("gpt-5.4") for name in model_ids)
         for model in RETIRED_MODELS:

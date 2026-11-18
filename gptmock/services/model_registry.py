@@ -71,6 +71,8 @@ FAST_SERVICE_TIER: str = "priority"
 def normalize_model_name(name: str | None, debug_model: str | None = None) -> str:
     raw = name if isinstance(name, str) else ""
     raw = raw.strip().lower().split(":", 1)[0].replace("_", "-").replace("gpt6-", "gpt-6-")
+    if raw == "gptmock-image":
+        raise ValueError("gptmock-image is an image model; use /v1/images/generations")
     if raw in {"gpt-6-astra-max", "gpt-6-astra-fast-max"}:
         raise ValueError("Removed model alias: use gpt-6-astra with reasoning.effort='max' (or reasoning_effort='max')")
     if isinstance(debug_model, str) and debug_model.strip():
@@ -289,7 +291,15 @@ def get_openai_models(
             "reasoning": _reasoning_metadata(mid, default_effort),
         }
         for mid in model_ids
-    ]
+    ] + [{
+        "id": "gptmock-image",
+        "object": "model",
+        "owned_by": "gptmock",
+        "mode": "image_generation",
+        "supported_endpoints": ["/v1/images/generations"],
+        "model_selection": "subscription_default",
+        "description": "Subscription image generation; exact backend model and requested dimensions are not guaranteed.",
+    }]
 
 
 def get_ollama_models(expose_reasoning: bool = False) -> list[dict[str, Any]]:
